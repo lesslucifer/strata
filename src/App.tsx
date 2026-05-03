@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { NodeMeta, ScanProgress, ScanSummary } from "./types";
-import { formatBytes, formatDate, joinPath } from "./util";
-import { extOf } from "./colors";
+import { formatBytes, formatDate, joinPath, truncatePath } from "./util";
+import { CATEGORIES, LEGEND_SPECIALS, extOf } from "./colors";
 import { Treemap, type SelectedRect } from "./Treemap";
 
 interface ContextMenuState {
@@ -100,27 +100,45 @@ export default function App() {
     };
   }, [menu]);
 
+  const showEmptyState = !scanning && !summary && !error;
+
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-wide">Strata</h1>
-        {!scanning && (
-          <button
-            onClick={pickAndScan}
-            className="rounded bg-blue-600 px-3 py-1 text-xs font-medium hover:bg-blue-500"
-          >
-            Choose folder
-          </button>
-        )}
-        {scanning && (
+      {scanning && (
+        <header className="grid grid-cols-[auto_auto_1fr] items-center gap-4 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
           <button
             onClick={cancelScan}
             className="rounded bg-red-600 px-3 py-1 text-xs font-medium hover:bg-red-500"
           >
             Cancel
           </button>
-        )}
-        {summary && !scanning && (
+          <span className="whitespace-nowrap text-xs text-zinc-400">
+            {progress ? (
+              <>
+                {progress.files.toLocaleString()} files ·{" "}
+                {progress.dirs.toLocaleString()} dirs · {formatBytes(progress.bytes)}
+              </>
+            ) : (
+              "Starting…"
+            )}
+          </span>
+          <span
+            className="min-w-0 truncate text-right font-mono text-xs text-zinc-600"
+            title={progress?.current_path ?? ""}
+          >
+            {truncatePath(progress?.current_path ?? "")}
+          </span>
+        </header>
+      )}
+      {!scanning && summary && (
+        <header className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
+          <h1 className="text-sm font-semibold tracking-wide">Strata</h1>
+          <button
+            onClick={pickAndScan}
+            className="rounded bg-blue-600 px-3 py-1 text-xs font-medium hover:bg-blue-500"
+          >
+            Choose folder
+          </button>
           <Breadcrumb
             rootName={summary.root_name}
             focus={focus}
@@ -129,30 +147,28 @@ export default function App() {
               setSelected(null);
             }}
           />
-        )}
-        {scanning && progress && (
-          <span className="ml-auto truncate text-xs text-zinc-400">
-            {progress.files.toLocaleString()} files ·{" "}
-            {progress.dirs.toLocaleString()} dirs ·{" "}
-            {formatBytes(progress.bytes)}
-            {progress.current_path && (
-              <span className="ml-2 text-zinc-600">{progress.current_path}</span>
-            )}
-          </span>
-        )}
-        {!scanning && summary && (
           <span className="ml-auto text-xs text-zinc-400">
             {formatBytes(summary.root_size)} · scanned in {summary.elapsed_ms} ms ·{" "}
             {summary.file_count.toLocaleString()} files
           </span>
-        )}
-      </header>
+          <Legend />
+        </header>
+      )}
       <main className="flex flex-1 overflow-hidden">
         <div className="flex-1 overflow-hidden">
           {error && <div className="p-4 text-sm text-red-400">Error: {error}</div>}
-          {!summary && !error && !scanning && (
-            <div className="grid h-full place-items-center text-sm text-zinc-500">
-              Pick a folder to scan.
+          {showEmptyState && (
+            <div className="grid h-full place-items-center">
+              <div className="flex flex-col items-center gap-4">
+                <h1 className="text-2xl font-semibold tracking-wide">Strata</h1>
+                <p className="text-sm text-zinc-500">Pick a folder to analyze its disk usage.</p>
+                <button
+                  onClick={pickAndScan}
+                  className="rounded bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-500"
+                >
+                  Choose folder
+                </button>
+              </div>
             </div>
           )}
           {scanning && !summary && (
@@ -178,14 +194,14 @@ export default function App() {
             />
           )}
         </div>
-        {selected && summary && (
+        {summary && (
           <DetailsPane
             selected={selected}
             meta={selectedMeta}
             absPath={
-              selected.rect.kind === "other"
-                ? ""
-                : joinPath(summary.path, [...focus, ...selected.rect.rel_path])
+              selected && selected.rect.kind !== "other"
+                ? joinPath(summary.path, [...focus, ...selected.rect.rel_path])
+                : ""
             }
             onClose={() => setSelected(null)}
           />
@@ -239,11 +255,20 @@ function DetailsPane({
   absPath,
   onClose,
 }: {
-  selected: SelectedRect;
+  selected: SelectedRect | null;
   meta: NodeMeta | null;
   absPath: string;
   onClose: () => void;
 }) {
+  if (!selected) {
+    return (
+      <aside className="w-72 shrink-0 border-l border-zinc-800 bg-zinc-900/50 p-4 text-xs">
+        <div className="grid h-full place-items-center text-center text-zinc-500">
+          <p>Select a rectangle to see details.</p>
+        </div>
+      </aside>
+    );
+  }
   const r = selected.rect;
   if (r.kind === "other") {
     return (
@@ -368,5 +393,55 @@ function MenuItem({
     >
       {label}
     </button>
+  );
+}
+
+function Legend() {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest("[data-legend]")) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+  return (
+    <div data-legend className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+      >
+        Legend
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-10 mt-1 w-56 rounded border border-zinc-700 bg-zinc-900 p-2 text-xs shadow-xl">
+          {CATEGORIES.map((c) => (
+            <LegendRow key={c.id} color={c.color} label={c.label} />
+          ))}
+          <div className="my-1 border-t border-zinc-800" />
+          {LEGEND_SPECIALS.map((s) => (
+            <LegendRow key={s.id} color={s.color} label={s.label} />
+          ))}
+          <div className="my-1 border-t border-zinc-800" />
+          <p className="px-2 py-1 text-[10px] text-zinc-500">
+            Other extensions get a stable color from a 64-hue palette.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LegendRow({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-2 px-2 py-1">
+      <span
+        className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/30"
+        style={{ background: color }}
+      />
+      <span className="text-zinc-300">{label}</span>
+    </div>
   );
 }

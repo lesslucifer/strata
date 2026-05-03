@@ -14,6 +14,17 @@ export function joinPath(base: string, segments: string[]): string {
   return trimmed + sep + segments.join(sep);
 }
 
+/// Shorten a path like "/a/b/c/d/e/f.txt" into "/a/.../f.txt" once it has more
+/// than `keep` segments. Keeps the very first and very last segments intact.
+export function truncatePath(path: string, keep: number = 3): string {
+  if (!path) return "";
+  const sep = path.includes("\\") && !path.includes("/") ? "\\" : "/";
+  const leading = path.startsWith(sep) ? sep : "";
+  const parts = path.split(sep).filter(Boolean);
+  if (parts.length <= keep) return path;
+  return `${leading}${parts[0]}${sep}…${sep}${parts[parts.length - 1]}`;
+}
+
 export function formatDate(ms: number | null): string {
   if (ms == null) return "—";
   return new Date(ms).toLocaleString();
