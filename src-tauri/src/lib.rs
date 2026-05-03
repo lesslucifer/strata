@@ -20,6 +20,29 @@ fn get_node_meta(
         .ok_or_else(|| "no scan loaded or path not found".into())
 }
 
+#[tauri::command]
+fn list_children(
+    store: tauri::State<'_, tree::TreeStore>,
+    rel_path: Vec<String>,
+) -> Result<Vec<tree::ChildEntry>, String> {
+    store
+        .with_subtree(&rel_path, |n| {
+            let mut entries: Vec<tree::ChildEntry> = n
+                .children
+                .iter()
+                .map(|c| tree::ChildEntry {
+                    name: c.name.clone(),
+                    size: c.size,
+                    is_dir: c.is_dir,
+                    has_children: !c.children.is_empty(),
+                })
+                .collect();
+            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            entries
+        })
+        .ok_or_else(|| "no scan loaded or path not found".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -31,6 +54,7 @@ pub fn run() {
             cancel::cancel_scan,
             layout::compute_layout,
             get_node_meta,
+            list_children,
             actions::reveal_in_finder,
             actions::open_path,
             actions::move_to_trash,

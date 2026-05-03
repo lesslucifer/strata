@@ -1,11 +1,19 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { NodeMeta, ScanProgress, ScanSummary } from "./types";
+import type { ChildEntry, NodeMeta, ScanProgress, ScanSummary } from "./types";
 import { formatBytes, formatDate, joinPath, truncatePath } from "./util";
-import { CATEGORIES, LEGEND_SPECIALS, extOf } from "./colors";
+import { CATEGORIES, LEGEND_SPECIALS, colorFor, extOf } from "./colors";
 import { Treemap, type SelectedRect } from "./Treemap";
+
+type Tab = "details" | "tree";
+
+// SOH is illegal in POSIX/Windows filenames, so it's a safe map key separator.
+const PATH_SEP = "";
+function pathKey(p: string[]): string {
+  return p.join(PATH_SEP);
+}
 
 interface ContextMenuState {
   x: number;
@@ -21,9 +29,21 @@ export default function App() {
   const [scanEpoch, setScanEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string[]>([]);
-  const [selected, setSelected] = useState<SelectedRect | null>(null);
+  // Logical selection: absolute path from scan root. Set by tree clicks AND by
+  // rect clicks on file/dir. The treemap derives its outline by matching this
+  // against `[...focus, ...rect.rel_path]`.
+  const [selectedAbsPath, setSelectedAbsPath] = useState<string[] | null>(null);
+  // Separate slot for `other` aggregation rects (no path; can't be tree-selected).
+  const [selectedOther, setSelectedOther] = useState<SelectedRect | null>(null);
   const [selectedMeta, setSelectedMeta] = useState<NodeMeta | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [tab, setTab] = useState<Tab>("details");
+
+  function clearSelection() {
+    setSelectedAbsPath(null);
+    setSelectedOther(null);
+    setSelectedMeta(null);
+  }
 
   async function pickAndScan() {
     setError(null);
@@ -31,8 +51,7 @@ export default function App() {
     if (!picked || typeof picked !== "string") return;
     setScanning(true);
     setFocus([]);
-    setSelected(null);
-    setSelectedMeta(null);
+    clearSelection();
     setProgress(null);
     setSummary(null);
 
@@ -61,19 +80,14 @@ export default function App() {
     }
   }
 
-  // Fetch full metadata for the selected rect (Treemap only has the visible bits).
+  // Fetch full metadata for the logically selected node.
   useEffect(() => {
-    if (!selected || !summary) {
+    if (!selectedAbsPath || !summary) {
       setSelectedMeta(null);
       return;
     }
-    if (selected.rect.kind === "other") {
-      setSelectedMeta(null);
-      return;
-    }
-    const relFromRoot = [...focus, ...selected.rect.rel_path];
     let cancelled = false;
-    invoke<NodeMeta>("get_node_meta", { relPath: relFromRoot })
+    invoke<NodeMeta>("get_node_meta", { relPath: selectedAbsPath })
       .then((m) => {
         if (!cancelled) setSelectedMeta(m);
       })
@@ -83,7 +97,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selected, focus, summary]);
+  }, [selectedAbsPath, summary]);
 
   // Dismiss context menu
   useEffect(() => {
@@ -99,6 +113,29 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
     };
   }, [menu]);
+
+  // Derive the rect-relative selection (relative to current focus) from the
+  // absolute path. Returns null if the selection isn't under the current focus.
+  const selectedRelPath = useMemo<string[] | null>(() => {
+    if (!selectedAbsPath) return null;
+    if (selectedAbsPath.length < focus.length) return null;
+    for (let i = 0; i < focus.length; i++) {
+      if (selectedAbsPath[i] !== focus[i]) return null;
+    }
+    return selectedAbsPath.slice(focus.length);
+  }, [selectedAbsPath, focus]);
+
+  // Treemap → App: rect was clicked.
+  function onRectSelect(sel: SelectedRect) {
+    if (sel.rect.kind === "other") {
+      setSelectedOther(sel);
+      setSelectedAbsPath(null);
+      setTab("details");
+      return;
+    }
+    setSelectedOther(null);
+    setSelectedAbsPath([...focus, ...sel.rect.rel_path]);
+  }
 
   const showEmptyState = !scanning && !summary && !error;
 
@@ -144,7 +181,7 @@ export default function App() {
             focus={focus}
             onJump={(i) => {
               setFocus(focus.slice(0, i));
-              setSelected(null);
+              setSelectedOther(null);
             }}
           />
           <span className="ml-auto text-xs text-zinc-400">
@@ -180,11 +217,12 @@ export default function App() {
             <Treemap
               focusPath={focus}
               scanEpoch={scanEpoch}
-              selected={selected}
-              onSelect={setSelected}
+              selectedRelPath={selectedRelPath}
+              selectedOther={selectedOther}
+              onSelect={onRectSelect}
               onDrillDown={(relPath) => {
                 setFocus([...focus, ...relPath]);
-                setSelected(null);
+                setSelectedOther(null);
               }}
               onContext={(sel, x, y) => {
                 if (!summary) return;
@@ -195,15 +233,20 @@ export default function App() {
           )}
         </div>
         {summary && (
-          <DetailsPane
-            selected={selected}
-            meta={selectedMeta}
-            absPath={
-              selected && selected.rect.kind !== "other"
-                ? joinPath(summary.path, [...focus, ...selected.rect.rel_path])
-                : ""
-            }
-            onClose={() => setSelected(null)}
+          <SidePanel
+            tab={tab}
+            onTab={setTab}
+            scanEpoch={scanEpoch}
+            scanRootName={summary.root_name}
+            scanRootPath={summary.path}
+            selectedAbsPath={selectedAbsPath}
+            selectedOther={selectedOther}
+            selectedMeta={selectedMeta}
+            onTreeSelect={(absPath) => {
+              setSelectedOther(null);
+              setSelectedAbsPath(absPath);
+            }}
+            onClose={clearSelection}
           />
         )}
       </main>
@@ -249,30 +292,101 @@ function Breadcrumb({
   );
 }
 
-function DetailsPane({
-  selected,
-  meta,
-  absPath,
+function SidePanel({
+  tab,
+  onTab,
+  scanEpoch,
+  scanRootName,
+  scanRootPath,
+  selectedAbsPath,
+  selectedOther,
+  selectedMeta,
+  onTreeSelect,
   onClose,
 }: {
-  selected: SelectedRect | null;
-  meta: NodeMeta | null;
-  absPath: string;
+  tab: Tab;
+  onTab: (t: Tab) => void;
+  scanEpoch: number;
+  scanRootName: string;
+  scanRootPath: string;
+  selectedAbsPath: string[] | null;
+  selectedOther: SelectedRect | null;
+  selectedMeta: NodeMeta | null;
+  onTreeSelect: (absPath: string[]) => void;
   onClose: () => void;
 }) {
-  if (!selected) {
+  return (
+    <aside className="flex w-80 shrink-0 flex-col border-l border-zinc-800 bg-zinc-900/50 text-xs">
+      <div className="flex shrink-0 border-b border-zinc-800">
+        <TabButton active={tab === "details"} onClick={() => onTab("details")}>
+          Details
+        </TabButton>
+        <TabButton active={tab === "tree"} onClick={() => onTab("tree")}>
+          Tree
+        </TabButton>
+      </div>
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {tab === "details" ? (
+          <DetailsTab
+            selectedAbsPath={selectedAbsPath}
+            selectedOther={selectedOther}
+            meta={selectedMeta}
+            scanRootPath={scanRootPath}
+            onClose={onClose}
+          />
+        ) : (
+          <TreeTab
+            scanEpoch={scanEpoch}
+            scanRootName={scanRootName}
+            selectedAbsPath={selectedAbsPath}
+            onSelect={onTreeSelect}
+          />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 px-3 py-2 text-xs font-medium ${
+        active
+          ? "bg-zinc-900 text-zinc-100"
+          : "text-zinc-400 hover:bg-zinc-900/50 hover:text-zinc-200"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DetailsTab({
+  selectedAbsPath,
+  selectedOther,
+  meta,
+  scanRootPath,
+  onClose,
+}: {
+  selectedAbsPath: string[] | null;
+  selectedOther: SelectedRect | null;
+  meta: NodeMeta | null;
+  scanRootPath: string;
+  onClose: () => void;
+}) {
+  if (selectedOther) {
+    const r = selectedOther.rect;
     return (
-      <aside className="w-72 shrink-0 border-l border-zinc-800 bg-zinc-900/50 p-4 text-xs">
-        <div className="grid h-full place-items-center text-center text-zinc-500">
-          <p>Select a rectangle to see details.</p>
-        </div>
-      </aside>
-    );
-  }
-  const r = selected.rect;
-  if (r.kind === "other") {
-    return (
-      <aside className="w-72 shrink-0 border-l border-zinc-800 bg-zinc-900/50 p-4 text-xs">
+      <div className="h-full overflow-auto p-4">
         <Header title={r.name} onClose={onClose} />
         <dl className="space-y-2">
           <Row label="Type" value="Aggregated bucket" />
@@ -283,25 +397,35 @@ function DetailsPane({
             value="These items were too small to draw individually. Drill down to see them."
           />
         </dl>
-      </aside>
+      </div>
     );
   }
-  const ext = extOf(r.name);
-  const type = r.kind === "dir" ? "Folder" : ext ? `.${ext} file` : "File";
+  if (!selectedAbsPath) {
+    return (
+      <div className="grid h-full place-items-center p-4 text-center text-zinc-500">
+        <p>Select a rectangle or a tree row to see details.</p>
+      </div>
+    );
+  }
+  const name = selectedAbsPath[selectedAbsPath.length - 1] ?? "";
+  const ext = extOf(name);
+  const isDir = meta?.is_dir ?? false;
+  const type = isDir ? "Folder" : ext ? `.${ext} file` : "File";
+  const absPath = joinPath(scanRootPath, selectedAbsPath);
   return (
-    <aside className="w-72 shrink-0 border-l border-zinc-800 bg-zinc-900/50 p-4 text-xs">
-      <Header title={r.name} onClose={onClose} />
+    <div className="h-full overflow-auto p-4">
+      <Header title={name} onClose={onClose} />
       <dl className="space-y-2">
         <Row label="Type" value={type} />
-        <Row label="Size" value={formatBytes(meta ? meta.size : r.size)} />
+        <Row label="Size" value={formatBytes(meta ? meta.size : 0)} />
         <Row
-          label={meta && meta.is_dir ? "Direct children" : "Items"}
+          label={isDir ? "Direct children" : "Items"}
           value={(meta ? meta.child_count : 1).toLocaleString()}
         />
         <Row label="Modified" value={formatDate(meta ? meta.modified_ms : null)} />
         <Row label="Path" value={absPath} mono />
       </dl>
-    </aside>
+    </div>
   );
 }
 
@@ -325,6 +449,300 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
     <div>
       <dt className="text-zinc-500">{label}</dt>
       <dd className={`break-all text-zinc-200 ${mono ? "font-mono" : ""}`}>{value}</dd>
+    </div>
+  );
+}
+
+// --- Tree explorer ---
+
+function TreeTab({
+  scanEpoch,
+  scanRootName,
+  selectedAbsPath,
+  onSelect,
+}: {
+  scanEpoch: number;
+  scanRootName: string;
+  selectedAbsPath: string[] | null;
+  onSelect: (absPath: string[]) => void;
+}) {
+  // Cache: pathKey -> children list. Survives tab switches; cleared on new scan.
+  const [cache, setCache] = useState<Map<string, ChildEntry[]>>(new Map());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [pendingFetches, setPendingFetches] = useState<Set<string>>(new Set());
+  const inflightRef = useRef<Set<string>>(new Set());
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [rowEl, setRowEl] = useState<HTMLDivElement | null>(null);
+
+  // Reset on new scan.
+  useEffect(() => {
+    setCache(new Map());
+    setExpanded(new Set());
+    setPendingFetches(new Set());
+    inflightRef.current = new Set();
+  }, [scanEpoch]);
+
+  const fetchChildren = useCallback(
+    async (path: string[]): Promise<ChildEntry[] | null> => {
+      const key = pathKey(path);
+      if (inflightRef.current.has(key)) return null;
+      inflightRef.current.add(key);
+      setPendingFetches((s) => {
+        const n = new Set(s);
+        n.add(key);
+        return n;
+      });
+      try {
+        const res = await invoke<ChildEntry[]>("list_children", { relPath: path });
+        setCache((c) => {
+          const n = new Map(c);
+          n.set(key, res);
+          return n;
+        });
+        return res;
+      } catch {
+        return null;
+      } finally {
+        inflightRef.current.delete(key);
+        setPendingFetches((s) => {
+          const n = new Set(s);
+          n.delete(key);
+          return n;
+        });
+      }
+    },
+    [],
+  );
+
+  // Auto-fetch root on first mount / new scan.
+  useEffect(() => {
+    if (!cache.has(pathKey([]))) {
+      void fetchChildren([]);
+    }
+  }, [cache, fetchChildren]);
+
+  const toggle = useCallback(
+    async (path: string[]) => {
+      const key = pathKey(path);
+      const isOpen = expanded.has(key);
+      if (isOpen) {
+        setExpanded((s) => {
+          const n = new Set(s);
+          n.delete(key);
+          return n;
+        });
+        return;
+      }
+      if (!cache.has(key)) await fetchChildren(path);
+      setExpanded((s) => {
+        const n = new Set(s);
+        n.add(key);
+        return n;
+      });
+    },
+    [expanded, cache, fetchChildren],
+  );
+
+  // When the rect-side selection changes, ensure all ancestors are expanded
+  // (and their children fetched), then scroll the row into view.
+  useEffect(() => {
+    if (!selectedAbsPath || selectedAbsPath.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const ancestors: string[][] = [];
+      for (let i = 0; i < selectedAbsPath.length; i++) {
+        ancestors.push(selectedAbsPath.slice(0, i));
+      }
+      const toExpand: string[] = [];
+      for (const a of ancestors) {
+        const k = pathKey(a);
+        if (!cache.has(k)) {
+          await fetchChildren(a);
+          if (cancelled) return;
+        }
+        toExpand.push(k);
+      }
+      setExpanded((s) => {
+        const n = new Set(s);
+        for (const k of toExpand) n.add(k);
+        return n;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAbsPath, cache, fetchChildren]);
+
+  // Scroll selection into view after the row mounts.
+  useEffect(() => {
+    if (rowEl) rowEl.scrollIntoView({ block: "nearest" });
+  }, [rowEl, selectedAbsPath]);
+
+  const rootChildren = cache.get(pathKey([]));
+  const rootKey = pathKey([]);
+  const rootSelected = selectedAbsPath !== null && selectedAbsPath.length === 0;
+  return (
+    <div ref={scrollRef} className="h-full overflow-auto py-1 font-mono text-xs">
+      <TreeRow
+        depth={0}
+        name={scanRootName}
+        size={null}
+        isDir
+        hasChildren={(rootChildren?.length ?? 0) > 0}
+        isOpen={expanded.has(rootKey)}
+        loading={pendingFetches.has(rootKey)}
+        selected={rootSelected}
+        onToggle={() => toggle([])}
+        onSelect={() => onSelect([])}
+        registerEl={rootSelected ? setRowEl : undefined}
+      />
+      {expanded.has(rootKey) && rootChildren && (
+        <TreeChildren
+          parentPath={[]}
+          children={rootChildren}
+          depth={1}
+          cache={cache}
+          expanded={expanded}
+          pending={pendingFetches}
+          selectedAbsPath={selectedAbsPath}
+          registerSelectedEl={setRowEl}
+          onToggle={toggle}
+          onSelect={onSelect}
+        />
+      )}
+    </div>
+  );
+}
+
+function TreeChildren({
+  parentPath,
+  children,
+  depth,
+  cache,
+  expanded,
+  pending,
+  selectedAbsPath,
+  registerSelectedEl,
+  onToggle,
+  onSelect,
+}: {
+  parentPath: string[];
+  children: ChildEntry[];
+  depth: number;
+  cache: Map<string, ChildEntry[]>;
+  expanded: Set<string>;
+  pending: Set<string>;
+  selectedAbsPath: string[] | null;
+  registerSelectedEl: (el: HTMLDivElement | null) => void;
+  onToggle: (path: string[]) => void;
+  onSelect: (path: string[]) => void;
+}) {
+  return (
+    <>
+      {children.map((c) => {
+        const path = [...parentPath, c.name];
+        const key = pathKey(path);
+        const isOpen = expanded.has(key);
+        const grandChildren = cache.get(key);
+        const isSelected =
+          selectedAbsPath !== null &&
+          selectedAbsPath.length === path.length &&
+          path.every((s, i) => selectedAbsPath[i] === s);
+        return (
+          <div key={c.name}>
+            <TreeRow
+              depth={depth}
+              name={c.name}
+              size={c.size}
+              isDir={c.is_dir}
+              hasChildren={c.has_children}
+              isOpen={isOpen}
+              loading={pending.has(key)}
+              selected={isSelected}
+              onToggle={() => onToggle(path)}
+              onSelect={() => onSelect(path)}
+              registerEl={isSelected ? registerSelectedEl : undefined}
+            />
+            {isOpen && grandChildren && (
+              <TreeChildren
+                parentPath={path}
+                children={grandChildren}
+                depth={depth + 1}
+                cache={cache}
+                expanded={expanded}
+                pending={pending}
+                selectedAbsPath={selectedAbsPath}
+                registerSelectedEl={registerSelectedEl}
+                onToggle={onToggle}
+                onSelect={onSelect}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function TreeRow({
+  depth,
+  name,
+  size,
+  isDir,
+  hasChildren,
+  isOpen,
+  loading,
+  selected,
+  onToggle,
+  onSelect,
+  registerEl,
+}: {
+  depth: number;
+  name: string;
+  size: number | null;
+  isDir: boolean;
+  hasChildren: boolean;
+  isOpen: boolean;
+  loading: boolean;
+  selected: boolean;
+  onToggle: () => void;
+  onSelect: () => void;
+  registerEl?: (el: HTMLDivElement | null) => void;
+}) {
+  const swatch = colorFor(name, isDir);
+  return (
+    <div
+      ref={registerEl}
+      className={`flex items-center gap-1 pr-2 ${
+        selected ? "bg-blue-900/40 text-zinc-100" : "text-zinc-300 hover:bg-zinc-800/60"
+      }`}
+      style={{ paddingLeft: 4 + depth * 12 }}
+    >
+      <button
+        onClick={onToggle}
+        className="grid h-4 w-4 shrink-0 place-items-center text-zinc-500 hover:text-zinc-200"
+        aria-label={isOpen ? "Collapse" : "Expand"}
+        disabled={!isDir || !hasChildren}
+      >
+        {isDir && hasChildren ? (loading ? "…" : isOpen ? "▾" : "▸") : ""}
+      </button>
+      <span
+        className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30"
+        style={{ background: swatch }}
+      />
+      <button
+        onClick={onSelect}
+        onDoubleClick={() => {
+          if (isDir && hasChildren) onToggle();
+        }}
+        className="min-w-0 flex-1 truncate text-left"
+        title={name}
+      >
+        {name}
+      </button>
+      {size !== null && (
+        <span className="shrink-0 text-[10px] text-zinc-500">{formatBytes(size)}</span>
+      )}
     </div>
   );
 }
@@ -424,10 +842,6 @@ function Legend() {
           {LEGEND_SPECIALS.map((s) => (
             <LegendRow key={s.id} color={s.color} label={s.label} />
           ))}
-          <div className="my-1 border-t border-zinc-800" />
-          <p className="px-2 py-1 text-[10px] text-zinc-500">
-            Other extensions get a stable color from a 64-hue palette.
-          </p>
         </div>
       )}
     </div>

@@ -11,7 +11,10 @@ export interface SelectedRect {
 interface Props {
   focusPath: string[]; // segments from scan root to current focus
   scanEpoch: number; // bump to force re-fetch after a new scan
-  selected: SelectedRect | null;
+  /// Relative path (from focusPath) to outline a file/dir rect, if any.
+  selectedRelPath: string[] | null;
+  /// Outline this exact `other` rect, if it's still in the current layout.
+  selectedOther: SelectedRect | null;
   onSelect: (sel: SelectedRect) => void;
   onDrillDown: (relPath: string[]) => void;
   onContext: (sel: SelectedRect, x: number, y: number) => void;
@@ -24,7 +27,8 @@ const RESIZE_DEBOUNCE_MS = 80;
 export function Treemap({
   focusPath,
   scanEpoch,
-  selected,
+  selectedRelPath,
+  selectedOther,
   onSelect,
   onDrillDown,
   onContext,
@@ -125,13 +129,18 @@ export function Treemap({
       }
     }
 
-    if (selected) {
-      const r = selected.rect;
+    const outline = findOutline(rects, selectedRelPath, selectedOther);
+    if (outline) {
       ctx.strokeStyle = "rgba(255,255,255,0.95)";
       ctx.lineWidth = 2;
-      ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+      ctx.strokeRect(
+        outline.x + 1,
+        outline.y + 1,
+        outline.w - 2,
+        outline.h - 2,
+      );
     }
-  }, [rects, size, selected]);
+  }, [rects, size, selectedRelPath, selectedOther]);
 
   function rectAt(px: number, py: number): RenderRect | null {
     return grid.hit(px, py);
@@ -202,6 +211,59 @@ export function Treemap({
 }
 
 // --- helpers ---
+
+interface OutlineBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/// Compute the outline bounding box for the current selection.
+/// - `selectedOther`: outline that exact rect (reference equality).
+/// - `selectedRelPath`: outline the union of every rect whose path is the
+///   selection or starts with it. For a file or a leaf-painted folder this is
+///   one rect; for a folder the layout recursed into, it's the bbox enclosing
+///   all its descendants.
+function findOutline(
+  rects: RenderRect[],
+  selectedRelPath: string[] | null,
+  selectedOther: SelectedRect | null,
+): OutlineBox | null {
+  if (selectedOther) {
+    for (const r of rects) {
+      if (r === selectedOther.rect) {
+        return { x: r.x, y: r.y, w: r.w, h: r.h };
+      }
+    }
+    return null;
+  }
+  if (!selectedRelPath || selectedRelPath.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let found = false;
+  for (const r of rects) {
+    if (r.kind === "other") continue;
+    if (!pathStartsWith(r.rel_path, selectedRelPath)) continue;
+    found = true;
+    if (r.x < minX) minX = r.x;
+    if (r.y < minY) minY = r.y;
+    if (r.x + r.w > maxX) maxX = r.x + r.w;
+    if (r.y + r.h > maxY) maxY = r.y + r.h;
+  }
+  if (!found) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function pathStartsWith(path: string[], prefix: string[]): boolean {
+  if (path.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (path[i] !== prefix[i]) return false;
+  }
+  return true;
+}
 
 function makeHatchPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
   const off = document.createElement("canvas");

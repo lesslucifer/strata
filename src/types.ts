@@ -35,3 +35,10 @@ export interface NodeMeta {
   modified_ms: number | null;
   child_count: number;
 }
+
+export interface ChildEntry {
+  name: string;
+  size: number;
+  is_dir: boolean;
+  has_children: boolean;
+}

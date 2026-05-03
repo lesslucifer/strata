@@ -57,3 +57,11 @@ pub struct NodeMeta {
     pub modified_ms: Option<u64>,
     pub child_count: u64,
 }
+
+#[derive(Debug, Serialize)]
+pub struct ChildEntry {
+    pub name: String,
+    pub size: u64,
+    pub is_dir: bool,
+    pub has_children: bool,
+}
