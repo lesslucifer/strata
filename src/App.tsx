@@ -1,26 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Node, ScanProgress, ScanResult } from "./types";
+import type { NodeMeta, ScanProgress, ScanSummary } from "./types";
 import { formatBytes, formatDate, joinPath } from "./util";
 import { extOf } from "./colors";
-import { Treemap, type NodeRef } from "./Treemap";
+import { Treemap, type SelectedRect } from "./Treemap";
 
 interface ContextMenuState {
   x: number;
   y: number;
-  ref: NodeRef;
   absPath: string;
+  isDir: boolean;
 }
 
 export default function App() {
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
-  const [result, setResult] = useState<ScanResult | null>(null);
+  const [summary, setSummary] = useState<ScanSummary | null>(null);
+  const [scanEpoch, setScanEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string[]>([]);
-  const [selected, setSelected] = useState<NodeRef | null>(null);
+  const [selected, setSelected] = useState<SelectedRect | null>(null);
+  const [selectedMeta, setSelectedMeta] = useState<NodeMeta | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
 
   async function pickAndScan() {
@@ -30,16 +32,18 @@ export default function App() {
     setScanning(true);
     setFocus([]);
     setSelected(null);
+    setSelectedMeta(null);
     setProgress(null);
-    setResult(null);
+    setSummary(null);
 
     const unlisten = await listen<ScanProgress>("scan-progress", (e) => {
       setProgress(e.payload);
     });
 
     try {
-      const res = await invoke<ScanResult>("scan_directory", { path: picked });
-      setResult(res);
+      const res = await invoke<ScanSummary>("scan_directory", { path: picked });
+      setSummary(res);
+      setScanEpoch((n) => n + 1);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -57,24 +61,31 @@ export default function App() {
     }
   }
 
-  const focused = useMemo<Node | null>(() => {
-    if (!result) return null;
-    let cur: Node = result.root;
-    for (const seg of focus) {
-      const next = cur.children.find((c) => c.name === seg);
-      if (!next) return cur;
-      cur = next;
+  // Fetch full metadata for the selected rect (Treemap only has the visible bits).
+  useEffect(() => {
+    if (!selected || !summary) {
+      setSelectedMeta(null);
+      return;
     }
-    return cur;
-  }, [result, focus]);
+    if (selected.rect.kind === "other") {
+      setSelectedMeta(null);
+      return;
+    }
+    const relFromRoot = [...focus, ...selected.rect.rel_path];
+    let cancelled = false;
+    invoke<NodeMeta>("get_node_meta", { relPath: relFromRoot })
+      .then((m) => {
+        if (!cancelled) setSelectedMeta(m);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedMeta(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, focus, summary]);
 
-  // Selected node's absolute path on disk.
-  const selectedAbsPath = useMemo<string | null>(() => {
-    if (!result || !selected) return null;
-    return joinPath(result.path, [...focus, ...selected.relPath]);
-  }, [result, focus, selected]);
-
-  // Dismiss the context menu on any click elsewhere or Escape.
+  // Dismiss context menu
   useEffect(() => {
     if (!menu) return;
     const onDown = () => setMenu(null);
@@ -109,9 +120,9 @@ export default function App() {
             Cancel
           </button>
         )}
-        {result && focused && !scanning && (
+        {summary && !scanning && (
           <Breadcrumb
-            rootName={result.root.name}
+            rootName={summary.root_name}
             focus={focus}
             onJump={(i) => {
               setFocus(focus.slice(0, i));
@@ -129,47 +140,53 @@ export default function App() {
             )}
           </span>
         )}
-        {!scanning && result && focused && (
+        {!scanning && summary && (
           <span className="ml-auto text-xs text-zinc-400">
-            {formatBytes(focused.size)} · scanned in {result.elapsed_ms} ms ·{" "}
-            {result.file_count.toLocaleString()} files
+            {formatBytes(summary.root_size)} · scanned in {summary.elapsed_ms} ms ·{" "}
+            {summary.file_count.toLocaleString()} files
           </span>
         )}
       </header>
       <main className="flex flex-1 overflow-hidden">
         <div className="flex-1 overflow-hidden">
           {error && <div className="p-4 text-sm text-red-400">Error: {error}</div>}
-          {!result && !error && !scanning && (
+          {!summary && !error && !scanning && (
             <div className="grid h-full place-items-center text-sm text-zinc-500">
               Pick a folder to scan.
             </div>
           )}
-          {scanning && !result && (
+          {scanning && !summary && (
             <div className="grid h-full place-items-center text-sm text-zinc-500">
               Scanning…
             </div>
           )}
-          {focused && (
+          {summary && (
             <Treemap
-              root={focused}
+              focusPath={focus}
+              scanEpoch={scanEpoch}
               selected={selected}
               onSelect={setSelected}
-              onDrillDown={(path) => {
-                setFocus([...focus, ...path]);
+              onDrillDown={(relPath) => {
+                setFocus([...focus, ...relPath]);
                 setSelected(null);
               }}
-              onContext={(ref, x, y) => {
-                if (!result) return;
-                const absPath = joinPath(result.path, [...focus, ...ref.relPath]);
-                setMenu({ x, y, ref, absPath });
+              onContext={(sel, x, y) => {
+                if (!summary) return;
+                const absPath = joinPath(summary.path, [...focus, ...sel.rect.rel_path]);
+                setMenu({ x, y, absPath, isDir: sel.rect.kind === "dir" });
               }}
             />
           )}
         </div>
-        {selected && (
+        {selected && summary && (
           <DetailsPane
-            node={selected.node}
-            absPath={selectedAbsPath ?? ""}
+            selected={selected}
+            meta={selectedMeta}
+            absPath={
+              selected.rect.kind === "other"
+                ? ""
+                : joinPath(summary.path, [...focus, ...selected.rect.rel_path])
+            }
             onClose={() => setSelected(null)}
           />
         )}
@@ -179,7 +196,7 @@ export default function App() {
           x={menu.x}
           y={menu.y}
           path={menu.absPath}
-          isDir={menu.ref.node.is_dir}
+          isDir={menu.isDir}
           onClose={() => setMenu(null)}
           onError={setError}
         />
@@ -217,36 +234,64 @@ function Breadcrumb({
 }
 
 function DetailsPane({
-  node,
+  selected,
+  meta,
   absPath,
   onClose,
 }: {
-  node: Node;
+  selected: SelectedRect;
+  meta: NodeMeta | null;
   absPath: string;
   onClose: () => void;
 }) {
-  const ext = extOf(node.name);
-  const itemCount = node.is_dir ? countDescendants(node) : 1;
+  const r = selected.rect;
+  if (r.kind === "other") {
+    return (
+      <aside className="w-72 shrink-0 border-l border-zinc-800 bg-zinc-900/50 p-4 text-xs">
+        <Header title={r.name} onClose={onClose} />
+        <dl className="space-y-2">
+          <Row label="Type" value="Aggregated bucket" />
+          <Row label="Size" value={formatBytes(r.size)} />
+          <Row label="Items" value={r.other_count.toLocaleString()} />
+          <Row
+            label="Note"
+            value="These items were too small to draw individually. Drill down to see them."
+          />
+        </dl>
+      </aside>
+    );
+  }
+  const ext = extOf(r.name);
+  const type = r.kind === "dir" ? "Folder" : ext ? `.${ext} file` : "File";
   return (
     <aside className="w-72 shrink-0 border-l border-zinc-800 bg-zinc-900/50 p-4 text-xs">
-      <div className="mb-3 flex items-start justify-between gap-2">
-        <div className="truncate font-mono text-sm font-medium">{node.name}</div>
-        <button
-          onClick={onClose}
-          className="text-zinc-500 hover:text-zinc-200"
-          aria-label="Close details"
-        >
-          ✕
-        </button>
-      </div>
+      <Header title={r.name} onClose={onClose} />
       <dl className="space-y-2">
-        <Row label="Type" value={node.is_dir ? "Folder" : ext ? `.${ext} file` : "File"} />
-        <Row label="Size" value={formatBytes(node.size)} />
-        <Row label="Items" value={itemCount.toLocaleString()} />
-        <Row label="Modified" value={formatDate(node.modified_ms)} />
+        <Row label="Type" value={type} />
+        <Row label="Size" value={formatBytes(meta ? meta.size : r.size)} />
+        <Row
+          label={meta && meta.is_dir ? "Direct children" : "Items"}
+          value={(meta ? meta.child_count : 1).toLocaleString()}
+        />
+        <Row label="Modified" value={formatDate(meta ? meta.modified_ms : null)} />
         <Row label="Path" value={absPath} mono />
       </dl>
     </aside>
+  );
+}
+
+function Header({ title, onClose }: { title: string; onClose: () => void }) {
+  return (
+    <div className="mb-3 flex items-start justify-between gap-2">
+      <div className="truncate font-mono text-sm font-medium">{title}</div>
+      <button
+        onClick={onClose}
+        className="text-zinc-500 hover:text-zinc-200"
+        aria-label="Close details"
+      >
+        ✕
+      </button>
+    </div>
   );
 }
 
@@ -257,12 +302,6 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
       <dd className={`break-all text-zinc-200 ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>
   );
-}
-
-function countDescendants(n: Node): number {
-  let c = 1;
-  for (const child of n.children) c += countDescendants(child);
-  return c;
 }
 
 function ContextMenu({

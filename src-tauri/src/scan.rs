@@ -9,20 +9,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::cancel::CancelFlag;
+use crate::tree::{Node, TreeStore};
 
 #[derive(Debug, Serialize)]
-pub struct Node {
-    pub name: String,
-    pub size: u64,
-    pub is_dir: bool,
-    pub modified_ms: Option<u64>,
-    pub children: Vec<Node>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScanResult {
+pub struct ScanSummary {
     pub path: String,
-    pub root: Node,
+    pub root_name: String,
+    pub root_size: u64,
     pub file_count: u64,
     pub dir_count: u64,
     pub elapsed_ms: u128,
@@ -42,8 +35,9 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 pub async fn scan_directory(
     app: AppHandle,
     cancel: State<'_, CancelFlag>,
+    store: State<'_, TreeStore>,
     path: String,
-) -> Result<ScanResult, String> {
+) -> Result<ScanSummary, String> {
     let p = PathBuf::from(&path);
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
@@ -57,6 +51,7 @@ pub async fn scan_directory(
 
     let app_for_blocking = app.clone();
     let scan_path = p.clone();
+    let started = Instant::now();
     let entries = tauri::async_runtime::spawn_blocking(move || {
         walk(&scan_path, &app_for_blocking, &cancel_handle)
     })
@@ -67,7 +62,6 @@ pub async fn scan_directory(
         return Err("cancelled".into());
     }
 
-    let started = Instant::now();
     let mut file_count = 0u64;
     let mut dir_count = 0u64;
     for e in &entries {
@@ -79,21 +73,23 @@ pub async fn scan_directory(
     }
 
     let root = build_tree(&p, entries);
-
-    Ok(ScanResult {
+    let summary = ScanSummary {
         path: p.to_string_lossy().to_string(),
-        root,
+        root_name: root.name.clone(),
+        root_size: root.size,
         file_count,
         dir_count,
         elapsed_ms: started.elapsed().as_millis(),
-    })
+    };
+    store.set(p, root);
+    Ok(summary)
 }
 
-struct EntryInfo {
-    path: PathBuf,
-    is_dir: bool,
-    size: u64,
-    modified_ms: Option<u64>,
+pub struct EntryInfo {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
 }
 
 fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> Vec<EntryInfo> {
@@ -242,6 +238,8 @@ fn build_node(
             children.push(child_node);
         }
     }
+    // Sort once at build time so the layout step doesn't re-sort.
+    children.sort_unstable_by(|a, b| b.size.cmp(&a.size));
 
     Node {
         name,

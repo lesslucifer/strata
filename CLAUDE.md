@@ -13,18 +13,30 @@ A Rust + Tauri disk usage analyzer (think WinDirStat / Disk Inventory X). This f
 
 ```
 src/                  # React frontend
-  App.tsx             # Shell: folder picker + result view
-  types.ts            # Mirror of Rust ScanResult / Node
-  util.ts             # formatBytes etc.
+  App.tsx             # Shell: folder picker + breadcrumb + details pane + context menu
+  Treemap.tsx         # Canvas paint of server-supplied rects + grid hit-test
+  colors.ts, util.ts  # Helpers
+  types.ts            # IPC type mirrors
 src-tauri/
   src/
     main.rs           # Entry — defers to lib::run()
     lib.rs            # Tauri Builder + invoke handlers
-    scan.rs           # Filesystem walk + tree build
-  tauri.conf.json     # App config (window size, identifier, bundle)
-  capabilities/       # Tauri v2 permissions (folder picker, etc.)
+    scan.rs           # jwalk + progress events; populates TreeStore
+    tree.rs           # Node + TreeStore (Mutex<Option<Tree>> in tauri::State)
+    layout.rs         # Squarified treemap + sibling aggregation (Other buckets)
+    cancel.rs         # Cancellation flag
+    actions.rs        # Reveal/open/trash commands
+  capabilities/       # Tauri v2 permissions
 PRD.md                # Product spec — read first
 ```
+
+## Data flow
+
+1. `scan_directory(path)` — runs `jwalk`, builds a `Node` tree, stores it in the `TreeStore` `tauri::State`. Returns only a small `ScanSummary` (no tree). Emits `scan-progress` events while running.
+2. `compute_layout(rel_path, w, h, max_rects)` — walks the cached subtree, runs squarify, aggregates sub-pixel siblings into synthetic `Other` rects, returns `Vec<RenderRect>` (typically a few thousand). The frontend re-fetches on resize, drill-down, and after a fresh scan.
+3. `get_node_meta(rel_path)` — cheap lookup for the details pane.
+
+The full tree never crosses the IPC boundary. This is deliberate; see PRD §8.
 
 ## Running
 
@@ -48,17 +60,19 @@ First `pnpm tauri dev` will compile ~400 Rust crates — slow once, fast after.
 
 ## Conventions
 
-- **IPC types must stay in sync.** Any change to `ScanResult` / `Node` in [src-tauri/src/scan.rs](src-tauri/src/scan.rs) must be mirrored in [src/types.ts](src/types.ts). Field names use `snake_case` on both sides (we don't run serde renaming).
+- **IPC types must stay in sync.** Any change to a `Serialize` struct returned by a `#[tauri::command]` must be mirrored in [src/types.ts](src/types.ts). Field names use `snake_case` on both sides (we don't run serde renaming).
 - **Errors to JS are strings.** `#[tauri::command]` returns `Result<T, String>`. Format via `format!`, don't introduce `thiserror` until we have multiple variants worth distinguishing.
-- **No blocking work on the Tauri main thread.** All scan commands are `async`. Heavy CPU work goes inside `tokio::task::spawn_blocking` or rayon — not directly in the async fn.
-- **Permissions are explicit.** New plugins (e.g. `tauri-plugin-fs`) require both `.plugin(...)` registration in [src-tauri/src/lib.rs](src-tauri/src/lib.rs) and a permission entry in [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json).
+- **No blocking work on the Tauri main thread.** Scan commands are `async`. Heavy CPU work goes inside `tauri::async_runtime::spawn_blocking` (do NOT pull in `tokio` directly — use the re-export).
+- **Permissions are explicit.** New plugins require both `.plugin(...)` registration in [src-tauri/src/lib.rs](src-tauri/src/lib.rs) and a permission entry in [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json).
+- **The frontend never owns the tree.** It holds a path (`focus: string[]`) and asks Rust for layouts/metadata. Don't reintroduce a "full tree in JS" model.
 
 ## Performance gotchas
 
 - `jwalk` defaults to a Rayon thread pool — already parallel. Don't wrap it in another `par_iter`.
 - macOS: `Metadata::len()` returns logical size. APFS clones report the same bytes for both copies (we double-count). Document this when we add a real metric column; don't try to fix it until v0.3.
-- Sending the entire tree across IPC is fine up to ~500k files. Past that, add a `get_children(path)` command and lazy-expand in the UI. Don't preoptimize.
-- Treemap rendering: use Canvas, not SVG. Above ~5k rectangles SVG falls over.
+- Treemap rendering: Canvas only. The layout step caps visible rects (`MAX_RECTS` in [src/Treemap.tsx](src/Treemap.tsx), `max_rects` argument to `compute_layout`); sub-pixel siblings collapse into `Other` buckets in [src-tauri/src/layout.rs](src-tauri/src/layout.rs). Do not bypass this — that's how WinDirStat-class tools stay responsive at 3M+ files.
+- Hit-testing uses a fixed 16×16 uniform grid in `Treemap.tsx`. Fine up to ~50k rects; revisit if we ever raise the budget.
+- Resize is debounced (~80 ms) before we re-request layout — avoids hammering Rust during window drag.
 
 ## What not to do
 

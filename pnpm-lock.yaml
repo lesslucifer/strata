@@ -14,9 +14,6 @@ importers:
       '@tauri-apps/plugin-dialog':
         specifier: ^2.0.1
         version: 2.7.1
-      d3-hierarchy:
-        specifier: ^3.1.2
-        version: 3.1.2
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -27,9 +24,6 @@ importers:
       '@tauri-apps/cli':
         specifier: ^2.1.0
         version: 2.11.0
-      '@types/d3-hierarchy':
-        specifier: ^3.1.7
-        version: 3.1.7
       '@types/react':
         specifier: ^18.3.12
         version: 18.3.28
@@ -545,9 +539,6 @@ packages:
   '@types/babel__traverse@7.28.0':
     resolution: {integrity: sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q==}
 
-  '@types/d3-hierarchy@3.1.7':
-    resolution: {integrity: sha512-tJFtNoYBtRtkNysX1Xq4sxtjK8YgoWUNpIiUee0/jHGRwqvzYxkq0hGVbbOGSz+JgFxxRu4K8nb3YpG3CMARtg==}
-
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
@@ -628,10 +619,6 @@ packages:
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
-
-  d3-hierarchy@3.1.2:
-    resolution: {integrity: sha512-FX/9frcub54beBdugHjDCdikxThEqjnR93Qt7PvQTOHxyiNCAlvMrHhclk3cD5VeAaq9fxmfRp+CnWw9rEMBuA==}
-    engines: {node: '>=12'}
 
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
@@ -1363,8 +1350,6 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.0
 
-  '@types/d3-hierarchy@3.1.7': {}
-
   '@types/estree@1.0.8': {}
 
   '@types/prop-types@15.7.15': {}
@@ -1447,8 +1432,6 @@ snapshots:
   cssesc@3.0.0: {}
 
   csstype@3.2.3: {}
-
-  d3-hierarchy@3.1.2: {}
 
   debug@4.4.3:
     dependencies:

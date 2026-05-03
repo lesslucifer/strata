@@ -1,73 +1,90 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from "d3-hierarchy";
-import type { Node } from "./types";
+import { invoke } from "@tauri-apps/api/core";
+import type { RenderRect } from "./types";
 import { colorFor } from "./colors";
 import { formatBytes } from "./util";
 
-export interface NodeRef {
-  node: Node;
-  relPath: string[]; // path segments from the current root to this node
+export interface SelectedRect {
+  rect: RenderRect;
 }
 
 interface Props {
-  root: Node;
-  selected: NodeRef | null;
-  onSelect: (ref: NodeRef) => void;
-  onDrillDown: (path: string[]) => void;
-  onContext: (ref: NodeRef, x: number, y: number) => void;
+  focusPath: string[]; // segments from scan root to current focus
+  scanEpoch: number; // bump to force re-fetch after a new scan
+  selected: SelectedRect | null;
+  onSelect: (sel: SelectedRect) => void;
+  onDrillDown: (relPath: string[]) => void;
+  onContext: (sel: SelectedRect, x: number, y: number) => void;
 }
 
-interface LaidOutRect {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-  node: HierarchyRectangularNode<Node>;
-}
+const MAX_RECTS = 12_000;
+const HATCH_PATTERN_SIZE = 8;
+const RESIZE_DEBOUNCE_MS = 80;
 
-const PADDING = 1;
-const MIN_DRAW_PX = 2;
-
-export function Treemap({ root, selected, onSelect, onDrillDown, onContext }: Props) {
+export function Treemap({
+  focusPath,
+  scanEpoch,
+  selected,
+  onSelect,
+  onDrillDown,
+  onContext,
+}: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hatchRef = useRef<CanvasPattern | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
-  const [hover, setHover] = useState<{ x: number; y: number; rect: LaidOutRect } | null>(null);
+  const [rects, setRects] = useState<RenderRect[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [hover, setHover] = useState<{ x: number; y: number; rect: RenderRect } | null>(null);
+  const fetchSeqRef = useRef(0);
 
+  // Debounced resize observer
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
+    let timer: number | undefined;
     const ro = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect;
-      setSize({ w: Math.floor(width), h: Math.floor(height) });
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        setSize({ w: Math.floor(width), h: Math.floor(height) });
+      }, RESIZE_DEBOUNCE_MS);
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      window.clearTimeout(timer);
+      ro.disconnect();
+    };
   }, []);
 
-  const rects = useMemo<LaidOutRect[]>(() => {
-    if (size.w < 10 || size.h < 10) return [];
-    const h = hierarchy<Node>(root, (d) => d.children)
-      .sum((d) => (d.children && d.children.length > 0 ? 0 : d.size))
-      .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  // Fetch layout from Rust whenever size, focus, or scan changes.
+  useEffect(() => {
+    if (size.w < 10 || size.h < 10) return;
+    const seq = ++fetchSeqRef.current;
+    setLoading(true);
+    invoke<RenderRect[]>("compute_layout", {
+      relPath: focusPath,
+      width: size.w,
+      height: size.h,
+      maxRects: MAX_RECTS,
+    })
+      .then((res) => {
+        if (seq !== fetchSeqRef.current) return; // stale
+        setRects(res);
+      })
+      .catch(() => {
+        if (seq !== fetchSeqRef.current) return;
+        setRects([]);
+      })
+      .finally(() => {
+        if (seq === fetchSeqRef.current) setLoading(false);
+      });
+  }, [size.w, size.h, focusPath, scanEpoch]);
 
-    treemap<Node>()
-      .size([size.w, size.h])
-      .paddingInner(PADDING)
-      .tile(treemapSquarify)(h);
+  // Spatial index for hit-testing (uniform grid).
+  const grid = useMemo(() => buildGrid(rects, size.w, size.h), [rects, size]);
 
-    const out: LaidOutRect[] = [];
-    h.each((n) => {
-      const r = n as HierarchyRectangularNode<Node>;
-      if (!n.children && r.x1 - r.x0 >= MIN_DRAW_PX && r.y1 - r.y0 >= MIN_DRAW_PX) {
-        out.push({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, node: r });
-      }
-    });
-    return out;
-  }, [root, size]);
-
-  const selectedKey = selected ? selected.relPath.join("/") : null;
-
+  // Paint
   useEffect(() => {
     const cvs = canvasRef.current;
     if (!cvs) return;
@@ -79,38 +96,45 @@ export function Treemap({ root, selected, onSelect, onDrillDown, onContext }: Pr
     const ctx = cvs.getContext("2d")!;
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, size.w, size.h);
+    // Background — covers the few sub-pixel gaps the layout leaves.
+    ctx.fillStyle = "rgb(20, 20, 22)";
+    ctx.fillRect(0, 0, size.w, size.h);
+
+    if (!hatchRef.current) hatchRef.current = makeHatchPattern(ctx);
 
     for (const r of rects) {
-      ctx.fillStyle = colorFor(r.node.data.name, r.node.data.is_dir);
-      ctx.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
-      const w = r.x1 - r.x0;
-      const h = r.y1 - r.y0;
-      if (w > 6 && h > 6) {
+      if (r.kind === "other") {
+        ctx.fillStyle = "rgb(50, 50, 55)";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        if (hatchRef.current) {
+          ctx.fillStyle = hatchRef.current;
+          ctx.fillRect(r.x, r.y, r.w, r.h);
+        }
+      } else {
+        ctx.fillStyle = colorFor(r.name, r.kind === "dir");
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+      }
+      // Cushion edges
+      if (r.w > 6 && r.h > 6) {
         ctx.fillStyle = "rgba(255,255,255,0.06)";
-        ctx.fillRect(r.x0, r.y0, w, 1);
-        ctx.fillRect(r.x0, r.y0, 1, h);
+        ctx.fillRect(r.x, r.y, r.w, 1);
+        ctx.fillRect(r.x, r.y, 1, r.h);
         ctx.fillStyle = "rgba(0,0,0,0.18)";
-        ctx.fillRect(r.x0, r.y1 - 1, w, 1);
-        ctx.fillRect(r.x1 - 1, r.y0, 1, h);
-      }
-      if (selectedKey && pathKey(r.node) === selectedKey) {
-        ctx.strokeStyle = "rgba(255,255,255,0.95)";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(r.x0 + 1, r.y0 + 1, w - 2, h - 2);
+        ctx.fillRect(r.x, r.y + r.h - 1, r.w, 1);
+        ctx.fillRect(r.x + r.w - 1, r.y, 1, r.h);
       }
     }
-  }, [rects, size, selectedKey]);
 
-  function rectAt(px: number, py: number): LaidOutRect | null {
-    for (let i = rects.length - 1; i >= 0; i--) {
-      const r = rects[i];
-      if (px >= r.x0 && px <= r.x1 && py >= r.y0 && py <= r.y1) return r;
+    if (selected) {
+      const r = selected.rect;
+      ctx.strokeStyle = "rgba(255,255,255,0.95)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
     }
-    return null;
-  }
+  }, [rects, size, selected]);
 
-  function refOf(r: LaidOutRect): NodeRef {
-    return { node: r.node.data, relPath: pathOf(r.node) };
+  function rectAt(px: number, py: number): RenderRect | null {
+    return grid.hit(px, py);
   }
 
   return (
@@ -119,35 +143,41 @@ export function Treemap({ root, selected, onSelect, onDrillDown, onContext }: Pr
         ref={canvasRef}
         className="block h-full w-full"
         onMouseMove={(e) => {
-          const rect = canvasRef.current!.getBoundingClientRect();
-          const x = e.clientX - rect.left;
-          const y = e.clientY - rect.top;
-          const r = rectAt(x, y);
+          const cvs = canvasRef.current;
+          if (!cvs) return;
+          const b = cvs.getBoundingClientRect();
+          const r = rectAt(e.clientX - b.left, e.clientY - b.top);
           setHover(r ? { x: e.clientX, y: e.clientY, rect: r } : null);
         }}
         onMouseLeave={() => setHover(null)}
         onClick={(e) => {
-          const rect = canvasRef.current!.getBoundingClientRect();
-          const r = rectAt(e.clientX - rect.left, e.clientY - rect.top);
+          const cvs = canvasRef.current;
+          if (!cvs) return;
+          const b = cvs.getBoundingClientRect();
+          const r = rectAt(e.clientX - b.left, e.clientY - b.top);
           if (!r) return;
-          onSelect(refOf(r));
+          onSelect({ rect: r });
         }}
         onDoubleClick={(e) => {
-          const rect = canvasRef.current!.getBoundingClientRect();
-          const r = rectAt(e.clientX - rect.left, e.clientY - rect.top);
+          const cvs = canvasRef.current;
+          if (!cvs) return;
+          const b = cvs.getBoundingClientRect();
+          const r = rectAt(e.clientX - b.left, e.clientY - b.top);
           if (!r) return;
-          const p = pathOf(r.node);
-          if (r.node.data.is_dir) onDrillDown(p);
-          else if (p.length > 0) onDrillDown(p.slice(0, -1));
+          if (r.kind === "other") return;
+          if (r.kind === "dir") onDrillDown(r.rel_path);
+          else if (r.rel_path.length > 0) onDrillDown(r.rel_path.slice(0, -1));
         }}
         onContextMenu={(e) => {
           e.preventDefault();
-          const rect = canvasRef.current!.getBoundingClientRect();
-          const r = rectAt(e.clientX - rect.left, e.clientY - rect.top);
-          if (!r) return;
-          const ref = refOf(r);
-          onSelect(ref);
-          onContext(ref, e.clientX, e.clientY);
+          const cvs = canvasRef.current;
+          if (!cvs) return;
+          const b = cvs.getBoundingClientRect();
+          const r = rectAt(e.clientX - b.left, e.clientY - b.top);
+          if (!r || r.kind === "other") return;
+          const sel = { rect: r };
+          onSelect(sel);
+          onContext(sel, e.clientX, e.clientY);
         }}
       />
       {hover && (
@@ -155,25 +185,77 @@ export function Treemap({ root, selected, onSelect, onDrillDown, onContext }: Pr
           className="pointer-events-none fixed z-10 rounded border border-zinc-700 bg-zinc-900/95 px-2 py-1 text-xs shadow-lg"
           style={{ left: hover.x + 12, top: hover.y + 12 }}
         >
-          <div className="font-mono">{hover.rect.node.data.name}</div>
-          <div className="text-zinc-400">{formatBytes(hover.rect.node.data.size)}</div>
-          <div className="text-zinc-500">{pathOf(hover.rect.node).join(" / ")}</div>
+          <div className="font-mono">{hover.rect.name}</div>
+          <div className="text-zinc-400">{formatBytes(hover.rect.size)}</div>
+          {hover.rect.kind !== "other" && (
+            <div className="text-zinc-500">{hover.rect.rel_path.join(" / ")}</div>
+          )}
+        </div>
+      )}
+      {loading && (
+        <div className="pointer-events-none absolute right-2 top-2 rounded bg-zinc-900/80 px-2 py-1 text-xs text-zinc-400">
+          Laying out…
         </div>
       )}
     </div>
   );
 }
 
-function pathOf(n: HierarchyRectangularNode<Node>): string[] {
-  const parts: string[] = [];
-  let cur: HierarchyRectangularNode<Node> | null = n;
-  while (cur && cur.parent) {
-    parts.unshift(cur.data.name);
-    cur = cur.parent as HierarchyRectangularNode<Node> | null;
-  }
-  return parts;
+// --- helpers ---
+
+function makeHatchPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  const off = document.createElement("canvas");
+  off.width = HATCH_PATTERN_SIZE;
+  off.height = HATCH_PATTERN_SIZE;
+  const octx = off.getContext("2d");
+  if (!octx) return null;
+  octx.strokeStyle = "rgba(255,255,255,0.07)";
+  octx.lineWidth = 1;
+  octx.beginPath();
+  octx.moveTo(0, HATCH_PATTERN_SIZE);
+  octx.lineTo(HATCH_PATTERN_SIZE, 0);
+  octx.stroke();
+  return ctx.createPattern(off, "repeat");
 }
 
-function pathKey(n: HierarchyRectangularNode<Node>): string {
-  return pathOf(n).join("/");
+interface Grid {
+  hit(x: number, y: number): RenderRect | null;
+}
+
+function buildGrid(rects: RenderRect[], w: number, h: number): Grid {
+  if (rects.length === 0 || w <= 0 || h <= 0) {
+    return { hit: () => null };
+  }
+  // ~16x16 cells, capped so very tall/wide canvases don't allocate huge grids.
+  const cols = 16;
+  const rows = 16;
+  const cw = w / cols;
+  const ch = h / rows;
+  const cells: number[][] = Array.from({ length: cols * rows }, () => []);
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const c0 = Math.max(0, Math.floor(r.x / cw));
+    const r0 = Math.max(0, Math.floor(r.y / ch));
+    const c1 = Math.min(cols - 1, Math.floor((r.x + r.w) / cw));
+    const r1 = Math.min(rows - 1, Math.floor((r.y + r.h) / ch));
+    for (let cy = r0; cy <= r1; cy++) {
+      for (let cx = c0; cx <= c1; cx++) {
+        cells[cy * cols + cx].push(i);
+      }
+    }
+  }
+  return {
+    hit(x, y) {
+      const cx = Math.floor(x / cw);
+      const cy = Math.floor(y / ch);
+      if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return null;
+      const list = cells[cy * cols + cx];
+      // Last-drawn-on-top, so iterate in reverse.
+      for (let i = list.length - 1; i >= 0; i--) {
+        const r = rects[list[i]];
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r;
+      }
+      return null;
+    },
+  };
 }
