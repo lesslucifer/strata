@@ -283,11 +283,13 @@ fn build_node(
             modified_ms,
             children: Vec::new(),
             deleted: false,
+            total_files: 1,
         });
     }
 
     let mut children = Vec::new();
     let mut total: u64 = 0;
+    let mut total_files: u64 = 0;
     if let Some(child_entries) = by_parent.remove(path) {
         // Check cancel periodically to bail out of large directory trees fast.
         if cancel.load(Ordering::Relaxed) {
@@ -308,9 +310,11 @@ fn build_node(
                     modified_ms: ce.modified_ms,
                     children: Vec::new(),
                     deleted: false,
+                    total_files: 1,
                 }
             };
             total += child_node.size;
+            total_files += child_node.total_files;
             children.push(child_node);
         }
     }
@@ -324,5 +328,6 @@ fn build_node(
         modified_ms,
         children,
         deleted: false,
+        total_files,
     })
 }

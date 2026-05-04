@@ -17,6 +17,10 @@ pub struct Node {
     /// treemap can render them as gone.
     #[serde(default)]
     pub deleted: bool,
+    /// Total file descendants (recursive) — used by grouped-rect labels and
+    /// the details pane. Computed once during tree build.
+    #[serde(default)]
+    pub total_files: u64,
 }
 
 impl Node {
@@ -51,6 +55,7 @@ pub struct TreeStore {
 }
 
 struct StoredTree {
+    root_path: PathBuf,
     root: Node,
     /// Computed once when the tree is set; whole-scan aggregate.
     type_stats: Vec<TypeStat>,
@@ -60,9 +65,9 @@ impl TreeStore {
     /// Stores the tree along with its precomputed type-stat cache.
     /// Compute the stats on the caller's thread (typically inside the scan's
     /// spawn_blocking task) so we don't hold the store mutex during the walk.
-    pub fn set(&self, _root_path: PathBuf, root: Node, type_stats: Vec<TypeStat>) {
+    pub fn set(&self, root_path: PathBuf, root: Node, type_stats: Vec<TypeStat>) {
         let mut g = self.inner.lock().unwrap();
-        *g = Some(StoredTree { root, type_stats });
+        *g = Some(StoredTree { root_path, root, type_stats });
     }
 
     pub fn with_subtree<R>(
@@ -75,6 +80,20 @@ impl TreeStore {
         let n = stored.root.descend(segments)?;
         Some(f(n))
     }
+
+    /// Same as `with_subtree`, but also passes the absolute scan-root path so
+    /// callers can rebuild absolute paths for matching against override lists.
+    pub fn with_subtree_and_root<R>(
+        &self,
+        segments: &[String],
+        f: impl FnOnce(&Node, &std::path::Path) -> R,
+    ) -> Option<R> {
+        let g = self.inner.lock().unwrap();
+        let stored = g.as_ref()?;
+        let n = stored.root.descend(segments)?;
+        Some(f(n, &stored.root_path))
+    }
+
 
     /// Mark a path (and everything beneath it) as deleted in the in-memory tree.
     /// Returns `true` if the path was found.
@@ -107,6 +126,12 @@ pub struct NodeMeta {
     pub modified_ms: Option<u64>,
     pub child_count: u64,
     pub deleted: bool,
+    /// Total file descendants (recursive). Equal to `child_count` for files.
+    pub total_files: u64,
+    /// True if this directory is currently grouped under the active settings.
+    pub grouped: bool,
+    /// Empty unless `grouped` — the category id (or "custom" / "forced").
+    pub group_category: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,4 +141,5 @@ pub struct ChildEntry {
     pub is_dir: bool,
     pub has_children: bool,
     pub deleted: bool,
+    pub grouped: bool,
 }

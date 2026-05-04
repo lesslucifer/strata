@@ -20,7 +20,7 @@ export interface ScanProgress {
   category_bytes: number[];
 }
 
-export type RectKind = "file" | "dir" | "other";
+export type RectKind = "file" | "dir" | "other" | "group";
 
 export interface RenderRect {
   x: number;
@@ -33,6 +33,10 @@ export interface RenderRect {
   rel_path: string[];
   other_count: number;
   deleted: boolean;
+  /// For "group" rects, the recursive file count of the grouped folder.
+  total_files: number;
+  /// For "group" rects, the matching category id (e.g. "code_packages").
+  group_category: string;
 }
 
 export interface NodeMeta {
@@ -42,6 +46,32 @@ export interface NodeMeta {
   modified_ms: number | null;
   child_count: number;
   deleted: boolean;
+  total_files: number;
+  grouped: boolean;
+  group_category: string;
+}
+
+export type GroupMatchKind = "name" | "dir_ext" | "name_under";
+
+export interface GroupRule {
+  kind: GroupMatchKind;
+  pattern: string;
+  under: string[];
+}
+
+export interface GroupCategory {
+  id: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  rules: GroupRule[];
+}
+
+export interface GroupSettings {
+  categories: GroupCategory[];
+  custom_rules: GroupRule[];
+  excluded_paths: string[];
+  forced_paths: string[];
 }
 
 export interface ChildEntry {
@@ -50,6 +80,7 @@ export interface ChildEntry {
   is_dir: boolean;
   has_children: boolean;
   deleted: boolean;
+  grouped: boolean;
 }
 
 export interface TypeStat {

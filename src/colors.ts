@@ -138,3 +138,43 @@ export function colorFor(name: string, isDir: boolean): string {
   const hue = Math.round((bucket * 360) / FALLBACK_PALETTE_SIZE);
   return `hsl(${hue}, 55%, 48%)`;
 }
+
+/// Color palette for grouped folders. Each built-in category gets a distinct
+/// hue so the user can read the treemap at a glance: code packages green,
+/// build output yellow, vcs gray, bundles blue, system metadata pink-red.
+/// Custom and forced overrides share a neutral teal so they don't visually
+/// imply membership in a built-in family.
+const GROUP_CATEGORY_COLORS: Record<string, string> = {
+  code_packages: "hsl(150, 45%, 38%)",
+  build_output: "hsl(38, 60%, 45%)",
+  vcs: "hsl(220, 8%, 38%)",
+  macos_bundles: "hsl(215, 55%, 48%)",
+  system_metadata: "hsl(340, 35%, 42%)",
+  custom: "hsl(180, 30%, 38%)",
+  forced: "hsl(180, 30%, 38%)",
+};
+
+export function colorForGroup(categoryId: string): string {
+  return GROUP_CATEGORY_COLORS[categoryId] ?? "hsl(220, 12%, 32%)";
+}
+
+export function labelForGroupCategory(categoryId: string): string {
+  switch (categoryId) {
+    case "code_packages":
+      return "Code package";
+    case "build_output":
+      return "Build output";
+    case "vcs":
+      return "VCS internals";
+    case "macos_bundles":
+      return "macOS bundle";
+    case "system_metadata":
+      return "System metadata";
+    case "custom":
+      return "Custom rule";
+    case "forced":
+      return "Forced group";
+    default:
+      return "Grouped folder";
+  }
+}

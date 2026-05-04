@@ -135,10 +135,12 @@ mod tests {
             modified_ms: None,
             children: vec![],
             deleted: false,
+            total_files: 1,
         }
     }
     fn dir(name: &str, children: Vec<Node>) -> Node {
         let size = children.iter().map(|c| c.size).sum();
+        let total_files = children.iter().map(|c| c.total_files).sum();
         Node {
             name: name.into(),
             size,
@@ -146,6 +148,7 @@ mod tests {
             modified_ms: None,
             children,
             deleted: false,
+            total_files,
         }
     }
 

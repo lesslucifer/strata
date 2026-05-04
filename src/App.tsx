@@ -4,10 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ChildEntry, NodeMeta, ScanProgress, ScanSummary } from "./types";
 import { formatBytes, formatDate, formatDuration, joinPath } from "./util";
-import { colorFor, extOf } from "./colors";
+import { colorFor, extOf, labelForGroupCategory } from "./colors";
 import { Treemap, type SelectedRect } from "./Treemap";
 import { TypesTab } from "./TypesTab";
 import { ScanProgressView } from "./ScanProgressView";
+import { GroupSettingsDialog } from "./GroupSettings";
 
 type Tab = "details" | "tree" | "types";
 
@@ -25,6 +26,8 @@ interface ContextMenuState {
   /// Path from the scan root, used to mark the in-memory tree as deleted.
   relFromRoot: string[];
   deleted: boolean;
+  /// True if the folder is currently rendered as a single grouped block.
+  grouped: boolean;
 }
 
 type ConfirmKind = "trash" | "delete";
@@ -55,6 +58,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("details");
   // Type filter is mutually exclusive with `focus`: setting one clears the other.
   const [extFilter, setExtFilter] = useState<string | null>(null);
+  const [groupSettingsOpen, setGroupSettingsOpen] = useState(false);
 
   function clearSelection() {
     setSelectedAbsPath(null);
@@ -218,6 +222,7 @@ export default function App() {
       relFromRoot: string[];
       isDir: boolean;
       deleted: boolean;
+      grouped: boolean;
       x: number;
       y: number;
     }) => {
@@ -229,6 +234,7 @@ export default function App() {
         absPath,
         isDir: args.isDir,
         deleted: args.deleted,
+        grouped: args.grouped,
         relFromRoot: args.relFromRoot,
       });
     },
@@ -259,6 +265,14 @@ export default function App() {
             className="rounded bg-blue-600 px-3 py-1 text-xs font-medium hover:bg-blue-500"
           >
             Select Folder
+          </button>
+          <button
+            onClick={() => setGroupSettingsOpen(true)}
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-700"
+            title="Folder grouping settings"
+            aria-label="Folder grouping settings"
+          >
+            ⚙
           </button>
           <Breadcrumb
             rootName={summary.root_name}
@@ -312,8 +326,9 @@ export default function App() {
               onContext={(sel, x, y) => {
                 openContextMenu({
                   relFromRoot: [...focus, ...sel.rect.rel_path],
-                  isDir: sel.rect.kind === "dir",
+                  isDir: sel.rect.kind === "dir" || sel.rect.kind === "group",
                   deleted: sel.rect.deleted,
+                  grouped: sel.rect.kind === "group",
                   x,
                   y,
                 });
@@ -350,10 +365,13 @@ export default function App() {
           path={menu.absPath}
           isDir={menu.isDir}
           deleted={menu.deleted}
+          grouped={menu.grouped}
           relFromRoot={menu.relFromRoot}
           onClose={() => setMenu(null)}
           onError={setError}
           onRequestDelete={requestDelete}
+          onOverrideChanged={() => setScanEpoch((n) => n + 1)}
+          onOpenSettings={() => setGroupSettingsOpen(true)}
         />
       )}
       {confirm && (
@@ -363,6 +381,11 @@ export default function App() {
           onConfirm={performDelete}
         />
       )}
+      <GroupSettingsDialog
+        open={groupSettingsOpen}
+        onClose={() => setGroupSettingsOpen(false)}
+        onChanged={() => setScanEpoch((n) => n + 1)}
+      />
     </div>
   );
 }
@@ -426,6 +449,7 @@ function SidePanel({
     relFromRoot: string[];
     isDir: boolean;
     deleted: boolean;
+    grouped: boolean;
     x: number;
     y: number;
   }) => void;
@@ -565,7 +589,13 @@ function DetailsTab({
   const name = selectedAbsPath[selectedAbsPath.length - 1] ?? "";
   const ext = extOf(name);
   const isDir = meta?.is_dir ?? false;
-  const type = isDir ? "Folder" : ext ? `${ext.toUpperCase()} file` : "File";
+  const isGrouped = meta?.grouped ?? false;
+  const groupCategoryLabel = isGrouped
+    ? labelForGroupCategory(meta?.group_category ?? "")
+    : "";
+  const type = isDir
+    ? isGrouped ? groupCategoryLabel : "Folder"
+    : ext ? `${ext.toUpperCase()} file` : "File";
   const absPath = joinPath(scanRootPath, selectedAbsPath);
   const isDeleted = meta?.deleted ?? false;
   return (
@@ -577,13 +607,25 @@ function DetailsTab({
             {isDir ? "Folder deleted" : "File deleted"}
           </div>
         )}
+        {isGrouped && !isDeleted && (
+          <div className="mb-3 rounded border border-zinc-700 bg-zinc-800/60 px-2 py-1.5 text-[11px] leading-relaxed text-zinc-300">
+            <div className="font-medium text-zinc-100">Treated as one block</div>
+            <div className="text-zinc-400">
+              Auto-generated folders like this are shown as a single rect — drill in or
+              right-click to override.
+            </div>
+          </div>
+        )}
         <dl className="space-y-2">
           <Row label="Type" value={type} />
           <Row label="Size" value={formatBytes(meta ? meta.size : 0)} />
           <Row
-            label={isDir ? "Items" : "File count"}
+            label={isDir ? "Direct items" : "File count"}
             value={(meta ? meta.child_count : 1).toLocaleString()}
           />
+          {isDir && meta && meta.total_files !== meta.child_count && (
+            <Row label="Total files" value={meta.total_files.toLocaleString()} />
+          )}
           <Row label="Last modified" value={formatDate(meta ? meta.modified_ms : null)} />
           <LocationRow absPath={absPath} />
         </dl>
@@ -711,6 +753,7 @@ function TreeTab({
     relFromRoot: string[];
     isDir: boolean;
     deleted: boolean;
+    grouped: boolean;
     x: number;
     y: number;
   }) => void;
@@ -844,7 +887,9 @@ function TreeTab({
         selected={rootSelected}
         onToggle={() => toggle([])}
         onSelect={() => onSelect([])}
-        onContext={(x, y) => onContext({ relFromRoot: [], isDir: true, deleted: false, x, y })}
+        onContext={(x, y) =>
+          onContext({ relFromRoot: [], isDir: true, deleted: false, grouped: false, x, y })
+        }
         registerEl={rootSelected ? setRowEl : undefined}
       />
       {expanded.has(rootKey) && rootChildren && (
@@ -893,6 +938,7 @@ function TreeChildren({
     relFromRoot: string[];
     isDir: boolean;
     deleted: boolean;
+    grouped: boolean;
     x: number;
     y: number;
   }) => void;
@@ -917,13 +963,21 @@ function TreeChildren({
               isDir={c.is_dir}
               hasChildren={c.has_children}
               deleted={c.deleted}
+              grouped={c.grouped}
               isOpen={isOpen}
               loading={pending.has(key)}
               selected={isSelected}
               onToggle={() => onToggle(path)}
               onSelect={() => onSelect(path)}
               onContext={(x, y) =>
-                onContext({ relFromRoot: path, isDir: c.is_dir, deleted: c.deleted, x, y })
+                onContext({
+                  relFromRoot: path,
+                  isDir: c.is_dir,
+                  deleted: c.deleted,
+                  grouped: c.grouped,
+                  x,
+                  y,
+                })
               }
               registerEl={isSelected ? registerSelectedEl : undefined}
             />
@@ -956,6 +1010,7 @@ function TreeRow({
   isDir,
   hasChildren,
   deleted,
+  grouped,
   isOpen,
   loading,
   selected,
@@ -970,6 +1025,7 @@ function TreeRow({
   isDir: boolean;
   hasChildren: boolean;
   deleted: boolean;
+  grouped?: boolean;
   isOpen: boolean;
   loading: boolean;
   selected: boolean;
@@ -1012,10 +1068,18 @@ function TreeRow({
           if (isDir && hasChildren) onToggle();
         }}
         className="min-w-0 flex-1 truncate text-left"
-        title={name}
+        title={grouped ? `${name} — grouped` : name}
       >
         {name}
       </button>
+      {grouped && (
+        <span
+          className="shrink-0 text-[9px] text-zinc-500"
+          title="Grouped: shown as a single block in the treemap"
+        >
+          ▦
+        </span>
+      )}
       {size !== null && (
         <span className="shrink-0 text-[10px] text-zinc-500">{formatBytes(size)}</span>
       )}
@@ -1029,20 +1093,26 @@ function ContextMenu({
   path,
   isDir,
   deleted,
+  grouped,
   relFromRoot,
   onClose,
   onError,
   onRequestDelete,
+  onOverrideChanged,
+  onOpenSettings,
 }: {
   x: number;
   y: number;
   path: string;
   isDir: boolean;
   deleted: boolean;
+  grouped: boolean;
   relFromRoot: string[];
   onClose: () => void;
   onError: (msg: string) => void;
   onRequestDelete: (req: ConfirmState) => void;
+  onOverrideChanged: () => void;
+  onOpenSettings: () => void;
 }) {
   async function run(cmd: string) {
     try {
@@ -1053,6 +1123,17 @@ function ContextMenu({
         await invoke("reveal_in_finder", { path });
       } else if (cmd === "open") {
         await invoke("open_path", { path });
+      } else if (cmd === "group") {
+        await invoke("add_path_override", { path, force: true });
+        onOverrideChanged();
+      } else if (cmd === "ungroup") {
+        await invoke("add_path_override", { path, force: false });
+        onOverrideChanged();
+      } else if (cmd === "clear_override") {
+        await invoke("clear_path_override", { path });
+        onOverrideChanged();
+      } else if (cmd === "open_settings") {
+        onOpenSettings();
       }
     } catch (e) {
       onError(String(e));
@@ -1062,7 +1143,7 @@ function ContextMenu({
   }
   return (
     <div
-      className="fixed z-20 min-w-[10rem] rounded border border-zinc-700 bg-zinc-900 py-1 text-xs shadow-xl"
+      className="fixed z-20 min-w-[12rem] rounded border border-zinc-700 bg-zinc-900 py-1 text-xs shadow-xl"
       style={{ left: x, top: y }}
       onMouseDown={(e) => e.stopPropagation()}
     >
@@ -1074,6 +1155,18 @@ function ContextMenu({
         <>
           <MenuItem label="Reveal in Finder" onClick={() => run("reveal")} />
           <MenuItem label={isDir ? "Open in Finder" : "Open"} onClick={() => run("open")} />
+          {isDir && relFromRoot.length > 0 && (
+            <>
+              <div className="my-1 border-t border-zinc-800" />
+              {grouped ? (
+                <MenuItem label="Don't group this folder" onClick={() => run("ungroup")} />
+              ) : (
+                <MenuItem label="Group as atomic" onClick={() => run("group")} />
+              )}
+              <MenuItem label="Clear override" onClick={() => run("clear_override")} />
+              <MenuItem label="Grouping settings…" onClick={() => run("open_settings")} />
+            </>
+          )}
           <div className="my-1 border-t border-zinc-800" />
           <MenuItem label="Move to Trash…" danger onClick={() => run("trash")} />
           <MenuItem label="Delete Permanently…" danger onClick={() => run("delete")} />

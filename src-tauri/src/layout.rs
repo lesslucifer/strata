@@ -1,6 +1,9 @@
+use std::path::{Path, PathBuf};
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::groups::{GroupMatcher, GroupSettingsStore};
 use crate::tree::{Node, TreeStore};
 
 #[derive(Debug, Serialize, Clone, Copy)]
@@ -8,6 +11,10 @@ use crate::tree::{Node, TreeStore};
 pub enum RectKind {
     File,
     Dir,
+    /// A folder treated as an atomic blob (node_modules, .git, *.app, …).
+    /// Painted as a single rect; double-click still drills in if the user
+    /// wants. Carries `total_files` for the label.
+    Group,
     Other, // aggregated bucket
 }
 
@@ -27,6 +34,14 @@ pub struct RenderRect {
     pub other_count: u32,
     /// True if the underlying node was deleted/trashed during this session.
     pub deleted: bool,
+    /// For `Group` rects: total file descendants of the grouped folder.
+    /// 0 for non-group rects.
+    #[serde(default)]
+    pub total_files: u64,
+    /// For `Group` rects: the category id that matched (e.g. "code_packages",
+    /// "vcs", "custom", "forced"). Empty for non-group rects.
+    #[serde(default)]
+    pub group_category: String,
 }
 
 const MIN_AREA: f32 = 16.0; // px²; smaller than this and we aggregate
@@ -48,11 +63,47 @@ pub async fn compute_layout(
     // so the IPC worker stays free to dispatch other commands (cancel,
     // get_node_meta) and the UI keeps painting.
     tauri::async_runtime::spawn_blocking(move || {
-        let store = app.state::<TreeStore>();
-        store
-            .with_subtree(&rel_path, |root| {
+        let tree_store = app.state::<TreeStore>();
+        let group_store = app.state::<GroupSettingsStore>();
+        let matcher = group_store.matcher();
+        tree_store
+            .with_subtree_and_root(&rel_path, |root, root_path| {
                 let mut out: Vec<RenderRect> = Vec::with_capacity(2048);
-                layout_node(root, &rel_path, 0.0, 0.0, width, height, &mut out, max_rects);
+                // Build the ancestor list down to (but not including) the
+                // current focus, plus the focus's absolute path. NameUnder
+                // rules need ancestors all the way to the system root, but
+                // we only have segments from the scan root. That's still
+                // useful (e.g. "Library/Application Support/X" focus will
+                // include Library + Application Support as ancestors).
+                let mut ancestor_names: Vec<String> = Vec::with_capacity(rel_path.len() + 8);
+                // Walk up from scan root through the OS — Library / Caches
+                // are usually system folders well above the scan, so include
+                // those parent components too.
+                if let Some(parent) = root_path.parent() {
+                    for c in parent.components() {
+                        if let std::path::Component::Normal(s) = c {
+                            ancestor_names.push(s.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+                if let Some(name) = root_path.file_name() {
+                    ancestor_names.push(name.to_string_lossy().into_owned());
+                }
+                ancestor_names.extend_from_slice(&rel_path);
+                let abs = abs_path_for(root_path, &rel_path);
+                layout_node(
+                    root,
+                    &rel_path,
+                    &ancestor_names,
+                    &abs,
+                    0.0,
+                    0.0,
+                    width,
+                    height,
+                    &mut out,
+                    max_rects,
+                    &matcher,
+                );
                 out
             })
             .ok_or_else(|| "no scan loaded or path not found".into())
@@ -61,18 +112,30 @@ pub async fn compute_layout(
     .map_err(|e| format!("layout task panicked: {e}"))?
 }
 
+fn abs_path_for(root: &Path, rel: &[String]) -> PathBuf {
+    let mut p = root.to_path_buf();
+    for s in rel {
+        p.push(s);
+    }
+    p
+}
+
 /// Recursive layout. For a given node, squarify its children inside (x,y,w,h).
 /// If a child is a directory and large enough, recurse into it; otherwise emit a leaf rect.
 /// Children below MIN_AREA are merged into a synthetic Other bucket.
+#[allow(clippy::too_many_arguments)]
 fn layout_node(
     node: &Node,
     base_path: &[String],
+    ancestor_names: &[String],
+    abs_path: &Path,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
     out: &mut Vec<RenderRect>,
     budget: usize,
+    matcher: &GroupMatcher,
 ) {
     if w * h < MIN_AREA || out.len() >= budget {
         return;
@@ -92,6 +155,8 @@ fn layout_node(
                 rel_path: Vec::new(),
                 other_count: 0,
                 deleted: node.deleted,
+                total_files: node.total_files,
+                group_category: String::new(),
             });
         }
         return;
@@ -163,6 +228,8 @@ fn layout_node(
                 rel_path: Vec::new(),
                 other_count,
                 deleted: false,
+                total_files: 0,
+                group_category: String::new(),
             });
             continue;
         }
@@ -170,9 +237,53 @@ fn layout_node(
         let mut child_path: Vec<String> = base_path.to_vec();
         child_path.push(child.name.clone());
 
+        // Group check: when a directory matches an active rule (or is forced
+        // by the user), paint it as a single atomic rect. Don't recurse —
+        // the whole point is to hide its internals.
+        let child_abs = abs_path.join(&child.name);
+        let group_cat = if child.is_dir {
+            matcher.match_category(child, &child_abs, ancestor_names).map(String::from)
+        } else {
+            None
+        };
+
+        if let Some(cat) = group_cat {
+            out.push(RenderRect {
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: r.h,
+                name: child.name.clone(),
+                size: child.size,
+                kind: RectKind::Group,
+                rel_path: child_path,
+                other_count: 0,
+                deleted: child.deleted,
+                total_files: child.total_files,
+                group_category: cat,
+            });
+            continue;
+        }
+
         if child.is_dir && !child.children.is_empty() && r.w * r.h >= MIN_AREA * 4.0 {
             // Recurse — paint this directory's interior with its children.
-            layout_node(child, &child_path, r.x, r.y, r.w, r.h, out, budget);
+            let mut child_ancestors: Vec<String> =
+                Vec::with_capacity(ancestor_names.len() + 1);
+            child_ancestors.extend_from_slice(ancestor_names);
+            child_ancestors.push(child.name.clone());
+            layout_node(
+                child,
+                &child_path,
+                &child_ancestors,
+                &child_abs,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                out,
+                budget,
+                matcher,
+            );
         } else {
             out.push(RenderRect {
                 x: r.x,
@@ -185,6 +296,8 @@ fn layout_node(
                 rel_path: child_path,
                 other_count: 0,
                 deleted: child.deleted,
+                total_files: child.total_files,
+                group_category: String::new(),
             });
         }
     }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { RenderRect } from "./types";
-import { colorFor, extOf } from "./colors";
+import { colorFor, colorForGroup, extOf } from "./colors";
 import { formatBytes } from "./util";
 
 export interface SelectedRect {
@@ -122,6 +122,12 @@ export function Treemap({
           ctx.fillStyle = hatchRef.current;
           ctx.fillRect(r.x, r.y, r.w, r.h);
         }
+      } else if (r.kind === "group") {
+        // Per-category palette so different group types are visually distinct
+        // (code packages vs. build output vs. macOS bundles, etc.).
+        baseColor = colorForGroup(r.group_category);
+        ctx.fillStyle = baseColor;
+        ctx.fillRect(r.x, r.y, r.w, r.h);
       } else {
         baseColor = colorFor(r.name, r.kind === "dir");
         ctx.fillStyle = baseColor;
@@ -135,6 +141,12 @@ export function Treemap({
         ctx.fillStyle = "rgba(0,0,0,0.18)";
         ctx.fillRect(r.x, r.y + r.h - 1, r.w, 1);
         ctx.fillRect(r.x + r.w - 1, r.y, 1, r.h);
+      }
+      // Group rects get a thicker outline so they read as a single block.
+      if (r.kind === "group" && r.w > 4 && r.h > 4) {
+        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5);
       }
       const dim = extFilter !== null && !rectMatchesExt(r, extFilter);
       if (dim) {
@@ -206,7 +218,7 @@ export function Treemap({
           const r = rectAt(e.clientX - b.left, e.clientY - b.top);
           if (!r) return;
           if (r.kind === "other") return;
-          if (r.kind === "dir") onDrillDown(r.rel_path);
+          if (r.kind === "dir" || r.kind === "group") onDrillDown(r.rel_path);
           else if (r.rel_path.length > 0) onDrillDown(r.rel_path.slice(0, -1));
         }}
         onContextMenu={(e) => {
@@ -227,7 +239,15 @@ export function Treemap({
           style={{ left: hover.x + 12, top: hover.y + 12 }}
         >
           <div className="font-mono">{hover.rect.name}</div>
-          <div className="text-zinc-400">{formatBytes(hover.rect.size)}</div>
+          <div className="text-zinc-400">
+            {formatBytes(hover.rect.size)}
+            {hover.rect.kind === "group" && hover.rect.total_files > 0 && (
+              <> · {hover.rect.total_files.toLocaleString()} items</>
+            )}
+          </div>
+          {hover.rect.kind === "group" && (
+            <div className="text-zinc-500">Grouped — double-click to drill in</div>
+          )}
           {hover.rect.kind !== "other" && hover.rect.rel_path.length > 0 && (
             <div className="text-zinc-500">{hover.rect.rel_path.join(" / ")}</div>
           )}
@@ -329,13 +349,29 @@ function drawLabel(
   const fgDim = light ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.65)";
 
   const innerW = r.w - LABEL_PAD_X * 2;
-  const sz = r.kind === "other" ? `+${r.other_count} · ${formatBytes(r.size)}` : formatBytes(r.size);
+  let sz: string;
+  if (r.kind === "other") {
+    sz = `+${r.other_count} · ${formatBytes(r.size)}`;
+  } else if (r.kind === "group") {
+    sz =
+      r.total_files > 0
+        ? `${formatBytes(r.size)} · ${r.total_files.toLocaleString()} items`
+        : formatBytes(r.size);
+  } else {
+    sz = formatBytes(r.size);
+  }
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "top";
   ctx.fillStyle = fg;
-  const sizeFitted = fitText(ctx, sz, innerW);
+  // Reserve space for the badge on grouped rects so size text doesn't overlap.
+  const badgeReserve = r.kind === "group" && r.w >= LABEL_MIN_W ? 12 : 0;
+  const sizeFitted = fitText(ctx, sz, innerW - badgeReserve);
   if (!sizeFitted) return;
   ctx.fillText(sizeFitted, r.x + LABEL_PAD_X, r.y + LABEL_PAD_Y);
+
+  if (r.kind === "group" && r.w >= LABEL_MIN_W && r.h >= LABEL_MIN_H) {
+    drawGroupBadge(ctx, r.x + r.w - 12, r.y + 4, fgDim);
+  }
 
   if (showName && r.kind !== "other") {
     ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
@@ -345,6 +381,22 @@ function drawLabel(
       ctx.fillText(nameFitted, r.x + LABEL_PAD_X, r.y + LABEL_PAD_Y + 13);
     }
   }
+}
+
+/// Tiny stacked-squares glyph that signals "this folder is treated as one item".
+function drawGroupBadge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, 6, 6);
+  ctx.strokeRect(x + 2.5, y + 2.5, 6, 6);
+  ctx.restore();
 }
 
 function fitText(
