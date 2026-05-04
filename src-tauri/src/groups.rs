@@ -417,7 +417,12 @@ mod tests {
 
     #[test]
     fn matches_dir_ext_rule() {
-        let s = GroupSettings::defaults();
+        let mut s = GroupSettings::defaults();
+        for c in &mut s.categories {
+            if c.id == "macos_bundles" {
+                c.enabled = true;
+            }
+        }
         let m = GroupMatcher::from_settings(&s);
         assert!(m.matches(&dir("Calendar.app"), Path::new("/Applications/Calendar.app"), &[]));
         assert!(m.matches(&dir("My Photos.photoslibrary"), Path::new("/p/My Photos.photoslibrary"), &[]));
