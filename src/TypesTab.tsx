@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { TypeStat } from "./types";
 import { colorFor } from "./colors";
@@ -12,7 +12,13 @@ interface Props {
   onFilter: (ext: string | null) => void;
 }
 
-export function TypesTab({ scanEpoch, extFilter, onFilter }: Props) {
+// Cap the visible list. Real-world scans can produce thousands of distinct
+// extensions (random temp suffixes, hash-named cache files, etc.). Rendering
+// every one as a DOM row destroys tab-switch perf. The long tail is also
+// uninteresting — almost always single-occurrence noise.
+const TOP_N = 50;
+
+function TypesTabImpl({ scanEpoch, extFilter, onFilter }: Props) {
   const [stats, setStats] = useState<TypeStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("size");
@@ -33,29 +39,37 @@ export function TypesTab({ scanEpoch, extFilter, onFilter }: Props) {
     };
   }, [scanEpoch]);
 
-  const sorted = useMemo(() => {
-    if (!stats) return null;
-    const copy = stats.slice();
+  const { rows, tail, maxSize } = useMemo(() => {
+    if (!stats) return { rows: null, tail: null, maxSize: 0 };
+    const sorted = stats.slice();
     if (sort === "count") {
-      copy.sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
+      sorted.sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
     } else {
-      copy.sort((a, b) => b.size - a.size || a.ext.localeCompare(b.ext));
+      sorted.sort((a, b) => b.size - a.size || a.ext.localeCompare(b.ext));
     }
-    return copy;
+    const head = sorted.slice(0, TOP_N);
+    const rest = sorted.slice(TOP_N);
+    let tailRow: { count: number; size: number; types: number } | null = null;
+    if (rest.length > 0) {
+      let s = 0;
+      let c = 0;
+      for (const r of rest) {
+        s += r.size;
+        c += r.count;
+      }
+      tailRow = { size: s, count: c, types: rest.length };
+    }
+    const max = sorted.reduce((m, s) => (s.size > m ? s.size : m), 0);
+    return { rows: head, tail: tailRow, maxSize: max };
   }, [stats, sort]);
-
-  const maxSize = useMemo(() => {
-    if (!stats) return 0;
-    return stats.reduce((m, s) => (s.size > m ? s.size : m), 0);
-  }, [stats]);
 
   if (error) {
     return <div className="p-4 text-red-400">Error: {error}</div>;
   }
-  if (!sorted) {
+  if (!rows) {
     return <div className="p-4 text-zinc-500">Computing types…</div>;
   }
-  if (sorted.length === 0) {
+  if (rows.length === 0) {
     return <div className="p-4 text-zinc-500">No files.</div>;
   }
 
@@ -71,44 +85,80 @@ export function TypesTab({ scanEpoch, extFilter, onFilter }: Props) {
         </SortHeader>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {sorted.map((s) => {
-          const label = s.ext === "" ? "(no ext)" : `.${s.ext}`;
-          const swatch = colorFor(s.ext === "" ? "x" : `x.${s.ext}`, false);
-          const active = extFilter === s.ext;
-          const pct = maxSize > 0 ? (s.size / maxSize) * 100 : 0;
-          return (
-            <button
-              key={s.ext}
-              onClick={() => onFilter(active ? null : s.ext)}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${
-                active ? "bg-blue-900/40 text-zinc-100" : "text-zinc-300 hover:bg-zinc-800/60"
-              }`}
-              title={`${label} — ${s.count.toLocaleString()} file${s.count === 1 ? "" : "s"}`}
-            >
-              <span
-                className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30"
-                style={{ background: swatch }}
-              />
-              <span className="min-w-0 flex-1 truncate font-mono">{label}</span>
-              <span className="relative w-14 shrink-0 text-right tabular-nums text-zinc-300">
-                {formatBytes(s.size)}
-              </span>
-              <span className="w-12 shrink-0 text-right tabular-nums text-zinc-500">
-                {s.count.toLocaleString()}
-              </span>
-              <span className="relative h-1.5 w-12 shrink-0 overflow-hidden rounded bg-zinc-800">
-                <span
-                  className="absolute inset-y-0 left-0"
-                  style={{ width: `${pct}%`, background: swatch }}
-                />
-              </span>
-            </button>
-          );
-        })}
+        {rows.map((s) => (
+          <TypeRow
+            key={s.ext}
+            stat={s}
+            active={extFilter === s.ext}
+            maxSize={maxSize}
+            onFilter={onFilter}
+          />
+        ))}
+        {tail && (
+          <div
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-500"
+            title={`${tail.types.toLocaleString()} other types not shown`}
+          >
+            <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30 bg-zinc-700" />
+            <span className="min-w-0 flex-1 truncate font-mono italic">
+              + {tail.types.toLocaleString()} more types
+            </span>
+            <span className="w-14 shrink-0 text-right tabular-nums">{formatBytes(tail.size)}</span>
+            <span className="w-12 shrink-0 text-right tabular-nums">
+              {tail.count.toLocaleString()}
+            </span>
+            <span className="w-12 shrink-0" />
+          </div>
+        )}
       </div>
     </div>
   );
 }
+
+// Memoized so unrelated App state changes (rect selection, hover, etc.)
+// don't reconcile this component. Stats only change on new scan; sort/filter
+// are local.
+export const TypesTab = memo(TypesTabImpl);
+
+interface RowProps {
+  stat: TypeStat;
+  active: boolean;
+  maxSize: number;
+  onFilter: (ext: string | null) => void;
+}
+
+const TypeRow = memo(function TypeRow({ stat, active, maxSize, onFilter }: RowProps) {
+  const label = stat.ext === "" ? "(no ext)" : `.${stat.ext}`;
+  const swatch = colorFor(stat.ext === "" ? "x" : `x.${stat.ext}`, false);
+  const pct = maxSize > 0 ? (stat.size / maxSize) * 100 : 0;
+  return (
+    <button
+      onClick={() => onFilter(active ? null : stat.ext)}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${
+        active ? "bg-blue-900/40 text-zinc-100" : "text-zinc-300 hover:bg-zinc-800/60"
+      }`}
+      title={`${label} — ${stat.count.toLocaleString()} file${stat.count === 1 ? "" : "s"}`}
+    >
+      <span
+        className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30"
+        style={{ background: swatch }}
+      />
+      <span className="min-w-0 flex-1 truncate font-mono">{label}</span>
+      <span className="w-14 shrink-0 text-right tabular-nums text-zinc-300">
+        {formatBytes(stat.size)}
+      </span>
+      <span className="w-12 shrink-0 text-right tabular-nums text-zinc-500">
+        {stat.count.toLocaleString()}
+      </span>
+      <span className="relative h-1.5 w-12 shrink-0 overflow-hidden rounded bg-zinc-800">
+        <span
+          className="absolute inset-y-0 left-0"
+          style={{ width: `${pct}%`, background: swatch }}
+        />
+      </span>
+    </button>
+  );
+});
 
 function SortHeader({
   active,

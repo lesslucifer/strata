@@ -54,13 +54,15 @@ export default function App() {
     if (next.length > 0 && extFilter !== null) setExtFilter(null);
   }
 
-  function applyExtFilter(ext: string | null) {
+  // Stable identity so memo'd children (TypesTab) don't re-render on every
+  // unrelated App state change (selection, hover, etc.).
+  const applyExtFilter = useCallback((ext: string | null) => {
     setExtFilter(ext);
-    if (ext !== null && focus.length > 0) {
-      setFocus([]);
+    if (ext !== null) {
+      setFocus((f) => (f.length > 0 ? [] : f));
       setSelectedOther(null);
     }
-  }
+  }, []);
 
   async function pickAndScan() {
     setError(null);
@@ -352,8 +354,11 @@ function SidePanel({
           Types
         </TabButton>
       </div>
+      {/* Keep all tab panels mounted so their internal state (fetched stats,
+          tree expansion, scroll) survives tab switches. Hide inactive ones
+          via display:none so they don't paint or take layout space. */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {tab === "details" && (
+        <TabPanel active={tab === "details"}>
           <DetailsTab
             selectedAbsPath={selectedAbsPath}
             selectedOther={selectedOther}
@@ -361,20 +366,28 @@ function SidePanel({
             scanRootPath={scanRootPath}
             onClose={onClose}
           />
-        )}
-        {tab === "tree" && (
+        </TabPanel>
+        <TabPanel active={tab === "tree"}>
           <TreeTab
             scanEpoch={scanEpoch}
             scanRootName={scanRootName}
             selectedAbsPath={selectedAbsPath}
             onSelect={onTreeSelect}
           />
-        )}
-        {tab === "types" && (
+        </TabPanel>
+        <TabPanel active={tab === "types"}>
           <TypesTab scanEpoch={scanEpoch} extFilter={extFilter} onFilter={onExtFilter} />
-        )}
+        </TabPanel>
       </div>
     </aside>
+  );
+}
+
+function TabPanel({ active, children }: { active: boolean; children: React.ReactNode }) {
+  return (
+    <div className="h-full" style={{ display: active ? undefined : "none" }}>
+      {children}
+    </div>
   );
 }
 

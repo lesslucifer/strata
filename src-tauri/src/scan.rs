@@ -52,8 +52,23 @@ pub async fn scan_directory(
     let app_for_blocking = app.clone();
     let scan_path = p.clone();
     let started = Instant::now();
-    let entries = tauri::async_runtime::spawn_blocking(move || {
-        walk(&scan_path, &app_for_blocking, &cancel_handle)
+    // Walk + tree-build + type-stats all run on the blocking pool so the IPC
+    // worker stays free. The type-stat precompute means the Types tab is
+    // instant on first open.
+    let (root, type_stats, file_count, dir_count) = tauri::async_runtime::spawn_blocking(move || {
+        let entries = walk(&scan_path, &app_for_blocking, &cancel_handle);
+        let mut files = 0u64;
+        let mut dirs = 0u64;
+        for e in &entries {
+            if e.is_dir {
+                dirs += 1;
+            } else {
+                files += 1;
+            }
+        }
+        let root = build_tree(&scan_path, entries);
+        let stats = crate::types_stats::compute(&root);
+        (root, stats, files, dirs)
     })
     .await
     .map_err(|e| format!("scan task panicked: {e}"))?;
@@ -62,17 +77,6 @@ pub async fn scan_directory(
         return Err("cancelled".into());
     }
 
-    let mut file_count = 0u64;
-    let mut dir_count = 0u64;
-    for e in &entries {
-        if e.is_dir {
-            dir_count += 1;
-        } else {
-            file_count += 1;
-        }
-    }
-
-    let root = build_tree(&p, entries);
     let summary = ScanSummary {
         path: p.to_string_lossy().to_string(),
         root_name: root.name.clone(),
@@ -81,7 +85,7 @@ pub async fn scan_directory(
         dir_count,
         elapsed_ms: started.elapsed().as_millis(),
     };
-    store.set(p, root);
+    store.set(p, root, type_stats);
     Ok(summary)
 }
 

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
+use rayon::prelude::*;
 use serde::Serialize;
 use tauri::State;
 
 use crate::tree::{Node, TreeStore};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TypeStat {
     /// Lowercased extension without the leading dot. Empty string for files
     /// with no extension.
@@ -15,22 +16,68 @@ pub struct TypeStat {
 }
 
 #[tauri::command]
-pub fn compute_type_stats(store: State<'_, TreeStore>) -> Result<Vec<TypeStat>, String> {
-    store
-        .with_subtree(&[], |root| {
-            let mut acc: HashMap<String, (u64, u64)> = HashMap::new();
-            walk(root, &mut acc);
-            let mut out: Vec<TypeStat> = acc
-                .into_iter()
-                .map(|(ext, (size, count))| TypeStat { ext, size, count })
-                .collect();
-            out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.ext.cmp(&b.ext)));
-            out
-        })
-        .ok_or_else(|| "no scan loaded".into())
+pub async fn compute_type_stats(
+    store: State<'_, TreeStore>,
+) -> Result<Vec<TypeStat>, String> {
+    // Fast path: scan completion populated the cache, return a clone instantly.
+    if let Some(cached) = store.type_stats() {
+        return Ok(cached);
+    }
+    // Cold path: compute now. Should be rare — only if the cache wasn't
+    // populated for some reason. Run on a blocking pool so we don't stall
+    // the IPC worker.
+    let snapshot = store.with_subtree(&[], |root| compute(root));
+    let stats = snapshot.ok_or_else(|| "no scan loaded".to_string())?;
+    store.set_type_stats(stats.clone());
+    Ok(stats)
 }
 
-fn walk(node: &Node, acc: &mut HashMap<String, (u64, u64)>) {
+/// Walks the tree in parallel and aggregates file sizes/counts by lowercased ext.
+pub fn compute(root: &Node) -> Vec<TypeStat> {
+    let acc = walk_par(root);
+    let mut out: Vec<TypeStat> = acc
+        .into_iter()
+        .map(|(ext, (size, count))| TypeStat { ext, size, count })
+        .collect();
+    out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.ext.cmp(&b.ext)));
+    out
+}
+
+fn walk_par(root: &Node) -> HashMap<String, (u64, u64)> {
+    // Parallelize across top-level children. Each thread builds a local map;
+    // we then merge. For balanced trees this is near-linear scaling.
+    if root.is_dir && !root.children.is_empty() {
+        root.children
+            .par_iter()
+            .map(|c| {
+                let mut local = HashMap::new();
+                walk_into(c, &mut local);
+                local
+            })
+            .reduce(HashMap::new, merge)
+    } else {
+        let mut local = HashMap::new();
+        walk_into(root, &mut local);
+        local
+    }
+}
+
+fn merge(
+    mut a: HashMap<String, (u64, u64)>,
+    b: HashMap<String, (u64, u64)>,
+) -> HashMap<String, (u64, u64)> {
+    if a.len() < b.len() {
+        return merge(b, a);
+    }
+    for (k, (s, c)) in b {
+        let e = a.entry(k).or_insert((0, 0));
+        e.0 += s;
+        e.1 += c;
+    }
+    a
+}
+
+fn walk_into(node: &Node, acc: &mut HashMap<String, (u64, u64)>) {
     if !node.is_dir {
         let ext = ext_of(&node.name);
         let entry = acc.entry(ext).or_insert((0, 0));
@@ -39,21 +86,27 @@ fn walk(node: &Node, acc: &mut HashMap<String, (u64, u64)>) {
         return;
     }
     for c in &node.children {
-        walk(c, acc);
+        walk_into(c, acc);
     }
 }
 
+/// Match the JS `extOf`: ignore leading-dot files (".gitignore" -> no ext)
+/// and trailing-dot names ("foo." -> no ext). Avoids allocating a new
+/// String when the extension is already lowercase ASCII.
 fn ext_of(name: &str) -> String {
-    let bytes = name.as_bytes();
-    // Match the JS extOf: ignore leading-dot files (".gitignore" -> no ext)
-    // and trailing-dot names ("foo." -> no ext).
     let Some(idx) = name.rfind('.') else {
         return String::new();
     };
-    if idx == 0 || idx == bytes.len() - 1 {
+    if idx == 0 || idx == name.len() - 1 {
         return String::new();
     }
-    name[idx + 1..].to_lowercase()
+    let raw = &name[idx + 1..];
+    if raw.bytes().all(|b| !b.is_ascii_uppercase()) {
+        // Already lowercase (or non-ASCII passthrough) — one allocation total.
+        raw.to_string()
+    } else {
+        raw.to_lowercase()
+    }
 }
 
 #[cfg(test)]
@@ -93,11 +146,14 @@ mod tests {
                 file("foo.", 5),
             ],
         );
-        let mut acc = HashMap::new();
-        walk(&root, &mut acc);
-        assert_eq!(acc.get("jpg"), Some(&(151, 3)));
-        assert_eq!(acc.get("txt"), Some(&(10, 1)));
+        let stats = compute(&root);
+        let map: HashMap<_, _> = stats
+            .into_iter()
+            .map(|s| (s.ext, (s.size, s.count)))
+            .collect();
+        assert_eq!(map.get("jpg"), Some(&(151, 3)));
+        assert_eq!(map.get("txt"), Some(&(10, 1)));
         // .gitignore, foo., and "e" all bucket as no-ext.
-        assert_eq!(acc.get(""), Some(&(15, 3)));
+        assert_eq!(map.get(""), Some(&(15, 3)));
     }
 }
