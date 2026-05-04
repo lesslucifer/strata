@@ -3,10 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ChildEntry, NodeMeta, ScanProgress, ScanSummary } from "./types";
-import { formatBytes, formatDate, joinPath, truncatePath } from "./util";
+import { formatBytes, formatDate, joinPath } from "./util";
 import { colorFor, extOf } from "./colors";
 import { Treemap, type SelectedRect } from "./Treemap";
 import { TypesTab } from "./TypesTab";
+import { ScanProgressView } from "./ScanProgressView";
 
 type Tab = "details" | "tree" | "types";
 
@@ -231,32 +232,6 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      {scanning && (
-        <header className="grid grid-cols-[auto_auto_1fr] items-center gap-4 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
-          <button
-            onClick={cancelScan}
-            className="rounded bg-red-600 px-3 py-1 text-xs font-medium hover:bg-red-500"
-          >
-            Cancel
-          </button>
-          <span className="whitespace-nowrap text-xs text-zinc-400">
-            {progress ? (
-              <>
-                {progress.files.toLocaleString()} files ·{" "}
-                {progress.dirs.toLocaleString()} dirs · {formatBytes(progress.bytes)}
-              </>
-            ) : (
-              "Starting…"
-            )}
-          </span>
-          <span
-            className="min-w-0 truncate text-right font-mono text-xs text-zinc-600"
-            title={progress?.current_path ?? ""}
-          >
-            {truncatePath(progress?.current_path ?? "")}
-          </span>
-        </header>
-      )}
       {!scanning && summary && (
         <header className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
           <h1 className="text-sm font-semibold tracking-wide">Strata</h1>
@@ -301,9 +276,7 @@ export default function App() {
             </div>
           )}
           {scanning && !summary && (
-            <div className="grid h-full place-items-center text-sm text-zinc-500">
-              Scanning…
-            </div>
+            <ScanProgressView progress={progress} onCancel={cancelScan} />
           )}
           {summary && (
             <Treemap

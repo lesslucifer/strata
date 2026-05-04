@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
 use crate::tree::{Node, TreeStore};
 
@@ -32,8 +32,8 @@ pub struct RenderRect {
 const MIN_AREA: f32 = 16.0; // px²; smaller than this and we aggregate
 
 #[tauri::command]
-pub fn compute_layout(
-    store: State<'_, TreeStore>,
+pub async fn compute_layout(
+    app: AppHandle,
     rel_path: Vec<String>,
     width: f32,
     height: f32,
@@ -44,13 +44,21 @@ pub fn compute_layout(
     }
     let max_rects = max_rects.max(100).min(200_000) as usize;
 
-    store
-        .with_subtree(&rel_path, |root| {
-            let mut out: Vec<RenderRect> = Vec::with_capacity(2048);
-            layout_node(root, &rel_path, 0.0, 0.0, width, height, &mut out, max_rects);
-            out
-        })
-        .ok_or_else(|| "no scan loaded or path not found".into())
+    // Squarify can take seconds for huge subtrees; run on the blocking pool
+    // so the IPC worker stays free to dispatch other commands (cancel,
+    // get_node_meta) and the UI keeps painting.
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<TreeStore>();
+        store
+            .with_subtree(&rel_path, |root| {
+                let mut out: Vec<RenderRect> = Vec::with_capacity(2048);
+                layout_node(root, &rel_path, 0.0, 0.0, width, height, &mut out, max_rects);
+                out
+            })
+            .ok_or_else(|| "no scan loaded or path not found".into())
+    })
+    .await
+    .map_err(|e| format!("layout task panicked: {e}"))?
 }
 
 /// Recursive layout. For a given node, squarify its children inside (x,y,w,h).

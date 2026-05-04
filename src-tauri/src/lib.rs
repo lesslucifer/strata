@@ -1,5 +1,6 @@
 mod actions;
 mod cancel;
+mod categories;
 mod layout;
 mod scan;
 mod tree;

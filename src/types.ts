@@ -7,11 +7,17 @@ export interface ScanSummary {
   elapsed_ms: number;
 }
 
+export type ScanPhase = "walking" | "building" | "indexing";
+
 export interface ScanProgress {
   files: number;
   dirs: number;
   bytes: number;
   current_path: string;
+  phase: ScanPhase;
+  /// Per-category accumulated bytes; slot order matches CATEGORIES in
+  /// colors.ts, with a trailing "other / unknown" bucket.
+  category_bytes: number[];
 }
 
 export type RectKind = "file" | "dir" | "other";

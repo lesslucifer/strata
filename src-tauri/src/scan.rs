@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::cancel::CancelFlag;
+use crate::categories::{SLOT_COUNT, slot_for_name};
 use crate::tree::{Node, TreeStore};
 
 #[derive(Debug, Serialize)]
@@ -27,6 +28,13 @@ pub struct ScanProgress {
     pub dirs: u64,
     pub bytes: u64,
     pub current_path: String,
+    /// "walking" while jwalk runs, "building" while we assemble the tree,
+    /// "indexing" while we precompute type stats. The frontend uses this to
+    /// keep the user informed during the silent post-walk phases.
+    pub phase: String,
+    /// Per-category accumulated bytes (slot order matches categories.rs and
+    /// src/colors.ts CATEGORIES; trailing entry is the "other/unknown" bucket).
+    pub category_bytes: Vec<u64>,
 }
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
@@ -56,7 +64,7 @@ pub async fn scan_directory(
     // worker stays free. The type-stat precompute means the Types tab is
     // instant on first open.
     let (root, type_stats, file_count, dir_count) = tauri::async_runtime::spawn_blocking(move || {
-        let entries = walk(&scan_path, &app_for_blocking, &cancel_handle);
+        let (entries, totals) = walk(&scan_path, &app_for_blocking, &cancel_handle);
         let mut files = 0u64;
         let mut dirs = 0u64;
         for e in &entries {
@@ -66,7 +74,11 @@ pub async fn scan_directory(
                 files += 1;
             }
         }
+        // Phase: building tree. Frontend uses this to switch the label
+        // and freeze the live type-mix bar at its final values.
+        emit_phase(&app_for_blocking, "building", &totals);
         let root = build_tree(&scan_path, entries);
+        emit_phase(&app_for_blocking, "indexing", &totals);
         let stats = crate::types_stats::compute(&root);
         (root, stats, files, dirs)
     })
@@ -96,10 +108,22 @@ pub struct EntryInfo {
     pub modified_ms: Option<u64>,
 }
 
-fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> Vec<EntryInfo> {
+/// Final counters from the walk, used to keep emitting consistent values
+/// during the post-walk phases (tree build, type indexing).
+pub struct WalkTotals {
+    pub files: u64,
+    pub dirs: u64,
+    pub bytes: u64,
+    pub category_bytes: Vec<u64>,
+}
+
+fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> (Vec<EntryInfo>, WalkTotals) {
     let files = AtomicU64::new(0);
     let dirs = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
+    // One atomic per category slot. Updated on every file entry; read by the
+    // throttled emitter without locking. Cheap relative to the metadata calls.
+    let category_bytes: Vec<AtomicU64> = (0..SLOT_COUNT).map(|_| AtomicU64::new(0)).collect();
     let last_emit = Mutex::new(Instant::now() - PROGRESS_INTERVAL);
 
     let entries: Vec<EntryInfo> = WalkDir::new(root)
@@ -127,10 +151,13 @@ fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> Vec<EntryInfo> {
             } else {
                 files.fetch_add(1, Ordering::Relaxed);
                 bytes.fetch_add(size, Ordering::Relaxed);
+                let name = e.file_name().to_string_lossy();
+                let slot = slot_for_name(&name);
+                category_bytes[slot].fetch_add(size, Ordering::Relaxed);
             }
 
             let path = e.path();
-            maybe_emit(app, &last_emit, &files, &dirs, &bytes, &path);
+            maybe_emit(app, &last_emit, &files, &dirs, &bytes, &category_bytes, &path);
 
             EntryInfo {
                 path,
@@ -141,17 +168,26 @@ fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> Vec<EntryInfo> {
         })
         .collect();
 
+    let totals = WalkTotals {
+        files: files.load(Ordering::Relaxed),
+        dirs: dirs.load(Ordering::Relaxed),
+        bytes: bytes.load(Ordering::Relaxed),
+        category_bytes: category_bytes.iter().map(|a| a.load(Ordering::Relaxed)).collect(),
+    };
+
     let _ = app.emit(
         "scan-progress",
         ScanProgress {
-            files: files.load(Ordering::Relaxed),
-            dirs: dirs.load(Ordering::Relaxed),
-            bytes: bytes.load(Ordering::Relaxed),
+            files: totals.files,
+            dirs: totals.dirs,
+            bytes: totals.bytes,
             current_path: String::new(),
+            phase: "walking".into(),
+            category_bytes: totals.category_bytes.clone(),
         },
     );
 
-    entries
+    (entries, totals)
 }
 
 fn maybe_emit(
@@ -160,6 +196,7 @@ fn maybe_emit(
     files: &AtomicU64,
     dirs: &AtomicU64,
     bytes: &AtomicU64,
+    category_bytes: &[AtomicU64],
     current: &Path,
 ) {
     let Ok(mut last) = last_emit.try_lock() else {
@@ -172,6 +209,7 @@ fn maybe_emit(
     *last = now;
     drop(last);
 
+    let cats: Vec<u64> = category_bytes.iter().map(|a| a.load(Ordering::Relaxed)).collect();
     let _ = app.emit(
         "scan-progress",
         ScanProgress {
@@ -179,6 +217,25 @@ fn maybe_emit(
             dirs: dirs.load(Ordering::Relaxed),
             bytes: bytes.load(Ordering::Relaxed),
             current_path: current.to_string_lossy().into_owned(),
+            phase: "walking".into(),
+            category_bytes: cats,
+        },
+    );
+}
+
+/// Emit a final-values progress event with the given phase tag. Used to mark
+/// post-walk phases ("building", "indexing") so the frontend can update its
+/// label without the live counters jumping around.
+fn emit_phase(app: &AppHandle, phase: &str, totals: &WalkTotals) {
+    let _ = app.emit(
+        "scan-progress",
+        ScanProgress {
+            files: totals.files,
+            dirs: totals.dirs,
+            bytes: totals.bytes,
+            current_path: String::new(),
+            phase: phase.into(),
+            category_bytes: totals.category_bytes.clone(),
         },
     );
 }
