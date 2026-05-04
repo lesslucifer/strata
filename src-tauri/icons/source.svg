@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0f1729"/>
+    </linearGradient>
+    <linearGradient id="t1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="t2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="t3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="t4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="t5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="t6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="t7" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230"/>
+    </clipPath>
+  </defs>
+
+  <!-- macOS Big Sur icon tile: corner radius ~22.5% of side. Tile fills full canvas. -->
+  <g clip-path="url(#tile)">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- Treemap content, ~10% safe-area padding inside the tile -->
+    <rect x="112" y="112" width="448" height="448" rx="20" fill="url(#t2)"/>
+    <rect x="576" y="112" width="336" height="280" rx="20" fill="url(#t1)"/>
+    <rect x="576" y="408" width="336" height="152" rx="20" fill="url(#t3)"/>
+    <rect x="112" y="576" width="280" height="336" rx="20" fill="url(#t4)"/>
+    <rect x="408" y="576" width="232" height="200" rx="20" fill="url(#t5)"/>
+    <rect x="408" y="792" width="232" height="120" rx="20" fill="url(#t7)"/>
+    <rect x="656" y="576" width="256" height="336" rx="20" fill="url(#t6)"/>
+  </g>
+</svg>
