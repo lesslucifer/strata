@@ -26,6 +26,7 @@ export interface RenderRect {
   kind: RectKind;
   rel_path: string[];
   other_count: number;
+  deleted: boolean;
 }
 
 export interface NodeMeta {
@@ -34,6 +35,7 @@ export interface NodeMeta {
   is_dir: boolean;
   modified_ms: number | null;
   child_count: number;
+  deleted: boolean;
 }
 
 export interface ChildEntry {

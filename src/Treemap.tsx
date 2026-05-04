@@ -40,6 +40,7 @@ export function Treemap({
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hatchRef = useRef<CanvasPattern | null>(null);
+  const deletedHatchRef = useRef<CanvasPattern | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [rects, setRects] = useState<RenderRect[]>([]);
   const [loading, setLoading] = useState(false);
@@ -109,6 +110,7 @@ export function Treemap({
     ctx.fillRect(0, 0, size.w, size.h);
 
     if (!hatchRef.current) hatchRef.current = makeHatchPattern(ctx);
+    if (!deletedHatchRef.current) deletedHatchRef.current = makeDeletedPattern(ctx);
 
     for (const r of rects) {
       let baseColor: string;
@@ -139,7 +141,24 @@ export function Treemap({
         ctx.fillStyle = "rgba(20, 20, 22, 0.72)";
         ctx.fillRect(r.x, r.y, r.w, r.h);
       }
-      drawLabel(ctx, r, baseColor, dim);
+      if (r.deleted) {
+        // Wash the rect almost out: heavy dark veil + red tint + bold red hatch.
+        ctx.fillStyle = "rgba(10, 10, 12, 0.82)";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.fillStyle = "rgba(180, 30, 30, 0.22)";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        if (deletedHatchRef.current) {
+          ctx.fillStyle = deletedHatchRef.current;
+          ctx.fillRect(r.x, r.y, r.w, r.h);
+        }
+        // Red border so even small rects read as deleted.
+        if (r.w > 2 && r.h > 2) {
+          ctx.strokeStyle = "rgba(220, 60, 60, 0.85)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+        }
+      }
+      drawLabel(ctx, r, baseColor, dim || r.deleted);
     }
 
     const outline = findOutline(rects, selectedRelPath, selectedOther);
@@ -406,6 +425,24 @@ function makeHatchPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
   octx.beginPath();
   octx.moveTo(0, HATCH_PATTERN_SIZE);
   octx.lineTo(HATCH_PATTERN_SIZE, 0);
+  octx.stroke();
+  return ctx.createPattern(off, "repeat");
+}
+
+// Bolder, red-tinted diagonal hatch — distinct from the subtle "other" pattern
+// so deleted rects read as "gone" at a glance.
+function makeDeletedPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  const size = 5;
+  const off = document.createElement("canvas");
+  off.width = size;
+  off.height = size;
+  const octx = off.getContext("2d");
+  if (!octx) return null;
+  octx.strokeStyle = "rgba(255, 90, 90, 0.85)";
+  octx.lineWidth = 2;
+  octx.beginPath();
+  octx.moveTo(-1, size + 1);
+  octx.lineTo(size + 1, -1);
   octx.stroke();
   return ctx.createPattern(off, "repeat");
 }

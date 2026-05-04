@@ -21,6 +21,9 @@ interface ContextMenuState {
   y: number;
   absPath: string;
   isDir: boolean;
+  /// Path from the scan root, used to mark the in-memory tree as deleted.
+  relFromRoot: string[];
+  deleted: boolean;
 }
 
 export default function App() {
@@ -117,7 +120,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedAbsPath, summary]);
+  }, [selectedAbsPath, summary, scanEpoch]);
 
   // Dismiss context menu
   useEffect(() => {
@@ -246,8 +249,16 @@ export default function App() {
               onDrillDown={(relPath) => applyFocus([...focus, ...relPath])}
               onContext={(sel, x, y) => {
                 if (!summary) return;
-                const absPath = joinPath(summary.path, [...focus, ...sel.rect.rel_path]);
-                setMenu({ x, y, absPath, isDir: sel.rect.kind === "dir" });
+                const relFromRoot = [...focus, ...sel.rect.rel_path];
+                const absPath = joinPath(summary.path, relFromRoot);
+                setMenu({
+                  x,
+                  y,
+                  absPath,
+                  isDir: sel.rect.kind === "dir",
+                  relFromRoot,
+                  deleted: sel.rect.deleted,
+                });
               }}
             />
           )}
@@ -278,8 +289,20 @@ export default function App() {
           y={menu.y}
           path={menu.absPath}
           isDir={menu.isDir}
+          deleted={menu.deleted}
+          relFromRoot={menu.relFromRoot}
           onClose={() => setMenu(null)}
           onError={setError}
+          onDeleted={(relFromRoot) => {
+            // Bump scanEpoch so the treemap re-fetches and picks up the new
+            // `deleted` flags. Tree/Types tabs also keyed off scanEpoch will
+            // refresh — that's fine; child lists are cheap.
+            setScanEpoch((n) => n + 1);
+            // Keep the deleted node selected so the details panel shows the
+            // "deleted" badge instead of going blank.
+            setSelectedOther(null);
+            setSelectedAbsPath(relFromRoot);
+          }}
         />
       )}
     </div>
@@ -472,9 +495,15 @@ function DetailsTab({
   const isDir = meta?.is_dir ?? false;
   const type = isDir ? "Folder" : ext ? `.${ext} file` : "File";
   const absPath = joinPath(scanRootPath, selectedAbsPath);
+  const isDeleted = meta?.deleted ?? false;
   return (
     <div className="h-full overflow-auto p-4">
       <Header title={name} onClose={onClose} />
+      {isDeleted && (
+        <div className="mb-3 rounded border border-red-800/60 bg-red-950/40 px-2 py-1 text-[11px] font-medium text-red-300">
+          {isDir ? "Folder deleted" : "File deleted"}
+        </div>
+      )}
       <dl className="space-y-2">
         <Row label="Type" value={type} />
         <Row label="Size" value={formatBytes(meta ? meta.size : 0)} />
@@ -812,15 +841,21 @@ function ContextMenu({
   y,
   path,
   isDir,
+  deleted,
+  relFromRoot,
   onClose,
   onError,
+  onDeleted,
 }: {
   x: number;
   y: number;
   path: string;
   isDir: boolean;
+  deleted: boolean;
+  relFromRoot: string[];
   onClose: () => void;
   onError: (msg: string) => void;
+  onDeleted: (relFromRoot: string[]) => void;
 }) {
   async function run(cmd: string) {
     try {
@@ -828,6 +863,17 @@ function ContextMenu({
         const ok = window.confirm(`Move to Trash?\n\n${path}`);
         if (!ok) return;
         await invoke("move_to_trash", { path });
+        await invoke("mark_path_deleted", { relPath: relFromRoot }).catch(() => {});
+        onDeleted(relFromRoot);
+      } else if (cmd === "delete") {
+        const noun = isDir ? "folder and ALL its contents" : "file";
+        const ok = window.confirm(
+          `Permanently delete this ${noun}?\n\n${path}\n\nThis cannot be undone — the trash is bypassed.`,
+        );
+        if (!ok) return;
+        await invoke("delete_permanent", { path });
+        await invoke("mark_path_deleted", { relPath: relFromRoot }).catch(() => {});
+        onDeleted(relFromRoot);
       } else if (cmd === "reveal") {
         await invoke("reveal_in_finder", { path });
       } else if (cmd === "open") {
@@ -845,10 +891,17 @@ function ContextMenu({
       style={{ left: x, top: y }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <MenuItem label="Reveal in Finder" onClick={() => run("reveal")} />
-      <MenuItem label={isDir ? "Open in Finder" : "Open"} onClick={() => run("open")} />
-      <div className="my-1 border-t border-zinc-800" />
-      <MenuItem label="Move to Trash…" danger onClick={() => run("trash")} />
+      {deleted ? (
+        <div className="px-3 py-1 text-zinc-500 italic">{isDir ? "Folder" : "File"} deleted</div>
+      ) : (
+        <>
+          <MenuItem label="Reveal in Finder" onClick={() => run("reveal")} />
+          <MenuItem label={isDir ? "Open in Finder" : "Open"} onClick={() => run("open")} />
+          <div className="my-1 border-t border-zinc-800" />
+          <MenuItem label="Move to Trash…" danger onClick={() => run("trash")} />
+          <MenuItem label="Delete permanently…" danger onClick={() => run("delete")} />
+        </>
+      )}
     </div>
   );
 }

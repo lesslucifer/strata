@@ -25,6 +25,8 @@ pub struct RenderRect {
     pub rel_path: Vec<String>,
     /// For `Other` rects, how many siblings were merged.
     pub other_count: u32,
+    /// True if the underlying node was deleted/trashed during this session.
+    pub deleted: bool,
 }
 
 const MIN_AREA: f32 = 16.0; // px²; smaller than this and we aggregate
@@ -81,6 +83,7 @@ fn layout_node(
                 kind: if node.is_dir { RectKind::Dir } else { RectKind::File },
                 rel_path: Vec::new(),
                 other_count: 0,
+                deleted: node.deleted,
             });
         }
         return;
@@ -151,6 +154,7 @@ fn layout_node(
                 kind: RectKind::Other,
                 rel_path: Vec::new(),
                 other_count,
+                deleted: false,
             });
             continue;
         }
@@ -172,6 +176,7 @@ fn layout_node(
                 kind: if child.is_dir { RectKind::Dir } else { RectKind::File },
                 rel_path: child_path,
                 other_count: 0,
+                deleted: child.deleted,
             });
         }
     }

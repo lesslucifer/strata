@@ -17,6 +17,7 @@ fn get_node_meta(
             is_dir: n.is_dir,
             modified_ms: n.modified_ms,
             child_count: n.children.len() as u64,
+            deleted: n.deleted,
         })
         .ok_or_else(|| "no scan loaded or path not found".into())
 }
@@ -60,6 +61,8 @@ pub fn run() {
             actions::reveal_in_finder,
             actions::open_path,
             actions::move_to_trash,
+            actions::delete_permanent,
+            actions::mark_path_deleted,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

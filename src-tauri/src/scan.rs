@@ -216,6 +216,7 @@ fn build_node(
             is_dir: false,
             modified_ms,
             children: Vec::new(),
+            deleted: false,
         };
     }
 
@@ -236,6 +237,7 @@ fn build_node(
                     is_dir: false,
                     modified_ms: ce.modified_ms,
                     children: Vec::new(),
+                    deleted: false,
                 }
             };
             total += child_node.size;
@@ -251,5 +253,6 @@ fn build_node(
         is_dir: true,
         modified_ms,
         children,
+        deleted: false,
     }
 }

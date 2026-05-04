@@ -12,6 +12,11 @@ pub struct Node {
     pub is_dir: bool,
     pub modified_ms: Option<u64>,
     pub children: Vec<Node>,
+    /// Marked when the user deletes (or trashes) the path during this session.
+    /// We don't re-scan; we just flag the node and any descendants so the
+    /// treemap can render them as gone.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 impl Node {
@@ -21,6 +26,22 @@ impl Node {
             cur = cur.children.iter().find(|c| &c.name == s)?;
         }
         Some(cur)
+    }
+
+    pub fn descend_mut<'a>(&'a mut self, segments: &[String]) -> Option<&'a mut Node> {
+        let mut cur = self;
+        for s in segments {
+            cur = cur.children.iter_mut().find(|c| &c.name == s)?;
+        }
+        Some(cur)
+    }
+
+    /// Mark this node and all descendants as deleted.
+    pub fn mark_deleted_recursive(&mut self) {
+        self.deleted = true;
+        for c in &mut self.children {
+            c.mark_deleted_recursive();
+        }
     }
 }
 
@@ -55,6 +76,16 @@ impl TreeStore {
         Some(f(n))
     }
 
+    /// Mark a path (and everything beneath it) as deleted in the in-memory tree.
+    /// Returns `true` if the path was found.
+    pub fn mark_deleted(&self, segments: &[String]) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        let Some(stored) = g.as_mut() else { return false };
+        let Some(n) = stored.root.descend_mut(segments) else { return false };
+        n.mark_deleted_recursive();
+        true
+    }
+
     pub fn type_stats(&self) -> Option<Vec<TypeStat>> {
         let g = self.inner.lock().unwrap();
         g.as_ref().map(|s| s.type_stats.clone())
@@ -75,6 +106,7 @@ pub struct NodeMeta {
     pub is_dir: bool,
     pub modified_ms: Option<u64>,
     pub child_count: u64,
+    pub deleted: bool,
 }
 
 #[derive(Debug, Serialize)]
