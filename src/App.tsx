@@ -4,10 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ChildEntry, NodeMeta, ScanProgress, ScanSummary } from "./types";
 import { formatBytes, formatDate, joinPath, truncatePath } from "./util";
-import { CATEGORIES, LEGEND_SPECIALS, colorFor, extOf } from "./colors";
+import { colorFor, extOf } from "./colors";
 import { Treemap, type SelectedRect } from "./Treemap";
+import { TypesTab } from "./TypesTab";
 
-type Tab = "details" | "tree";
+type Tab = "details" | "tree" | "types";
 
 // SOH is illegal in POSIX/Windows filenames, so it's a safe map key separator.
 const PATH_SEP = "";
@@ -38,11 +39,27 @@ export default function App() {
   const [selectedMeta, setSelectedMeta] = useState<NodeMeta | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [tab, setTab] = useState<Tab>("details");
+  // Type filter is mutually exclusive with `focus`: setting one clears the other.
+  const [extFilter, setExtFilter] = useState<string | null>(null);
 
   function clearSelection() {
     setSelectedAbsPath(null);
     setSelectedOther(null);
     setSelectedMeta(null);
+  }
+
+  function applyFocus(next: string[]) {
+    setFocus(next);
+    setSelectedOther(null);
+    if (next.length > 0 && extFilter !== null) setExtFilter(null);
+  }
+
+  function applyExtFilter(ext: string | null) {
+    setExtFilter(ext);
+    if (ext !== null && focus.length > 0) {
+      setFocus([]);
+      setSelectedOther(null);
+    }
   }
 
   async function pickAndScan() {
@@ -51,6 +68,7 @@ export default function App() {
     if (!picked || typeof picked !== "string") return;
     setScanning(true);
     setFocus([]);
+    setExtFilter(null);
     clearSelection();
     setProgress(null);
     setSummary(null);
@@ -179,16 +197,18 @@ export default function App() {
           <Breadcrumb
             rootName={summary.root_name}
             focus={focus}
-            onJump={(i) => {
-              setFocus(focus.slice(0, i));
-              setSelectedOther(null);
-            }}
+            onJump={(i) => applyFocus(focus.slice(0, i))}
           />
+          {extFilter !== null && (
+            <FilterChip
+              label={extFilter === "" ? "(no ext)" : `.${extFilter}`}
+              onClear={() => setExtFilter(null)}
+            />
+          )}
           <span className="ml-auto text-xs text-zinc-400">
             {formatBytes(summary.root_size)} · scanned in {summary.elapsed_ms} ms ·{" "}
             {summary.file_count.toLocaleString()} files
           </span>
-          <Legend />
         </header>
       )}
       <main className="flex flex-1 overflow-hidden">
@@ -219,11 +239,9 @@ export default function App() {
               scanEpoch={scanEpoch}
               selectedRelPath={selectedRelPath}
               selectedOther={selectedOther}
+              extFilter={extFilter}
               onSelect={onRectSelect}
-              onDrillDown={(relPath) => {
-                setFocus([...focus, ...relPath]);
-                setSelectedOther(null);
-              }}
+              onDrillDown={(relPath) => applyFocus([...focus, ...relPath])}
               onContext={(sel, x, y) => {
                 if (!summary) return;
                 const absPath = joinPath(summary.path, [...focus, ...sel.rect.rel_path]);
@@ -242,6 +260,8 @@ export default function App() {
             selectedAbsPath={selectedAbsPath}
             selectedOther={selectedOther}
             selectedMeta={selectedMeta}
+            extFilter={extFilter}
+            onExtFilter={applyExtFilter}
             onTreeSelect={(absPath) => {
               setSelectedOther(null);
               setSelectedAbsPath(absPath);
@@ -301,6 +321,8 @@ function SidePanel({
   selectedAbsPath,
   selectedOther,
   selectedMeta,
+  extFilter,
+  onExtFilter,
   onTreeSelect,
   onClose,
 }: {
@@ -312,6 +334,8 @@ function SidePanel({
   selectedAbsPath: string[] | null;
   selectedOther: SelectedRect | null;
   selectedMeta: NodeMeta | null;
+  extFilter: string | null;
+  onExtFilter: (ext: string | null) => void;
   onTreeSelect: (absPath: string[]) => void;
   onClose: () => void;
 }) {
@@ -324,9 +348,12 @@ function SidePanel({
         <TabButton active={tab === "tree"} onClick={() => onTab("tree")}>
           Tree
         </TabButton>
+        <TabButton active={tab === "types"} onClick={() => onTab("types")}>
+          Types
+        </TabButton>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
-        {tab === "details" ? (
+        {tab === "details" && (
           <DetailsTab
             selectedAbsPath={selectedAbsPath}
             selectedOther={selectedOther}
@@ -334,7 +361,8 @@ function SidePanel({
             scanRootPath={scanRootPath}
             onClose={onClose}
           />
-        ) : (
+        )}
+        {tab === "tree" && (
           <TreeTab
             scanEpoch={scanEpoch}
             scanRootName={scanRootName}
@@ -342,8 +370,27 @@ function SidePanel({
             onSelect={onTreeSelect}
           />
         )}
+        {tab === "types" && (
+          <TypesTab scanEpoch={scanEpoch} extFilter={extFilter} onFilter={onExtFilter} />
+        )}
       </div>
     </aside>
+  );
+}
+
+function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded border border-blue-700 bg-blue-900/40 px-2 py-0.5 text-xs text-blue-100">
+      <span className="text-blue-300">Type:</span>
+      <span className="font-mono">{label}</span>
+      <button
+        onClick={onClear}
+        className="ml-1 text-blue-300 hover:text-white"
+        aria-label="Clear type filter"
+      >
+        ✕
+      </button>
+    </span>
   );
 }
 
@@ -814,48 +861,3 @@ function MenuItem({
   );
 }
 
-function Legend() {
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (!t.closest("[data-legend]")) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [open]);
-  return (
-    <div data-legend className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-      >
-        Legend
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-10 mt-1 w-56 rounded border border-zinc-700 bg-zinc-900 p-2 text-xs shadow-xl">
-          {CATEGORIES.map((c) => (
-            <LegendRow key={c.id} color={c.color} label={c.label} />
-          ))}
-          <div className="my-1 border-t border-zinc-800" />
-          {LEGEND_SPECIALS.map((s) => (
-            <LegendRow key={s.id} color={s.color} label={s.label} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LegendRow({ color, label }: { color: string; label: string }) {
-  return (
-    <div className="flex items-center gap-2 px-2 py-1">
-      <span
-        className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/30"
-        style={{ background: color }}
-      />
-      <span className="text-zinc-300">{label}</span>
-    </div>
-  );
-}

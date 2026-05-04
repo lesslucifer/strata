@@ -3,6 +3,7 @@ mod cancel;
 mod layout;
 mod scan;
 mod tree;
+mod types_stats;
 
 #[tauri::command]
 fn get_node_meta(
@@ -53,6 +54,7 @@ pub fn run() {
             scan::scan_directory,
             cancel::cancel_scan,
             layout::compute_layout,
+            types_stats::compute_type_stats,
             get_node_meta,
             list_children,
             actions::reveal_in_finder,

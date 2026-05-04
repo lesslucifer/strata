@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { RenderRect } from "./types";
-import { colorFor } from "./colors";
+import { colorFor, extOf } from "./colors";
 import { formatBytes } from "./util";
 
 export interface SelectedRect {
@@ -15,6 +15,9 @@ interface Props {
   selectedRelPath: string[] | null;
   /// Outline this exact `other` rect, if it's still in the current layout.
   selectedOther: SelectedRect | null;
+  /// Lowercased ext (or "" for no-ext) to highlight; null = no filter.
+  /// Non-matching file rects, all dir rects, and all `other` rects render dimmed.
+  extFilter: string | null;
   onSelect: (sel: SelectedRect) => void;
   onDrillDown: (relPath: string[]) => void;
   onContext: (sel: SelectedRect, x: number, y: number) => void;
@@ -29,6 +32,7 @@ export function Treemap({
   scanEpoch,
   selectedRelPath,
   selectedOther,
+  extFilter,
   onSelect,
   onDrillDown,
   onContext,
@@ -127,6 +131,11 @@ export function Treemap({
         ctx.fillRect(r.x, r.y + r.h - 1, r.w, 1);
         ctx.fillRect(r.x + r.w - 1, r.y, 1, r.h);
       }
+      // Dim non-matching rects when a type filter is active.
+      if (extFilter !== null && !rectMatchesExt(r, extFilter)) {
+        ctx.fillStyle = "rgba(20, 20, 22, 0.72)";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+      }
     }
 
     const outline = findOutline(rects, selectedRelPath, selectedOther);
@@ -140,7 +149,7 @@ export function Treemap({
         outline.h - 2,
       );
     }
-  }, [rects, size, selectedRelPath, selectedOther]);
+  }, [rects, size, selectedRelPath, selectedOther, extFilter]);
 
   function rectAt(px: number, py: number): RenderRect | null {
     return grid.hit(px, py);
@@ -255,6 +264,13 @@ function findOutline(
   }
   if (!found) return null;
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+// Treemap rects are file leaves or recursed-into dirs. Dirs and `other` buckets
+// never match a type filter — only file rects whose ext equals the filter do.
+function rectMatchesExt(r: RenderRect, ext: string): boolean {
+  if (r.kind !== "file") return false;
+  return extOf(r.name) === ext;
 }
 
 function pathStartsWith(path: string[], prefix: string[]): boolean {

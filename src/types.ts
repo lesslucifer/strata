@@ -42,3 +42,9 @@ export interface ChildEntry {
   is_dir: boolean;
   has_children: boolean;
 }
+
+export interface TypeStat {
+  ext: string;
+  size: number;
+  count: number;
+}
