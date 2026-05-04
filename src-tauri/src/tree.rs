@@ -115,4 +115,5 @@ pub struct ChildEntry {
     pub size: u64,
     pub is_dir: bool,
     pub has_children: bool,
+    pub deleted: bool,
 }

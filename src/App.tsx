@@ -26,6 +26,15 @@ interface ContextMenuState {
   deleted: boolean;
 }
 
+type ConfirmKind = "trash" | "delete";
+
+interface ConfirmState {
+  kind: ConfirmKind;
+  absPath: string;
+  isDir: boolean;
+  relFromRoot: string[];
+}
+
 export default function App() {
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
@@ -41,6 +50,7 @@ export default function App() {
   const [selectedOther, setSelectedOther] = useState<SelectedRect | null>(null);
   const [selectedMeta, setSelectedMeta] = useState<NodeMeta | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [tab, setTab] = useState<Tab>("details");
   // Type filter is mutually exclusive with `focus`: setting one clears the other.
   const [extFilter, setExtFilter] = useState<string | null>(null);
@@ -49,6 +59,39 @@ export default function App() {
     setSelectedAbsPath(null);
     setSelectedOther(null);
     setSelectedMeta(null);
+  }
+
+  async function runDelete(req: ConfirmState) {
+    try {
+      if (req.kind === "trash") {
+        await invoke("move_to_trash", { path: req.absPath });
+      } else {
+        await invoke("delete_permanent", { path: req.absPath });
+      }
+      await invoke("mark_path_deleted", { relPath: req.relFromRoot }).catch(() => {});
+      setScanEpoch((n) => n + 1);
+      setSelectedOther(null);
+      setSelectedAbsPath(req.relFromRoot);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function requestDelete(req: ConfirmState) {
+    setMenu(null);
+    if (req.kind === "trash") {
+      // Trash is reversible — no confirmation needed.
+      void runDelete(req);
+      return;
+    }
+    setConfirm(req);
+  }
+
+  async function performDelete() {
+    if (!confirm) return;
+    const req = confirm;
+    setConfirm(null);
+    await runDelete(req);
   }
 
   function applyFocus(next: string[]) {
@@ -147,6 +190,30 @@ export default function App() {
     }
     return selectedAbsPath.slice(focus.length);
   }, [selectedAbsPath, focus]);
+
+  // Open the context menu for a given path (used by treemap rect right-click and
+  // tree-row right-click). `deleted` skips destructive options.
+  const openContextMenu = useCallback(
+    (args: {
+      relFromRoot: string[];
+      isDir: boolean;
+      deleted: boolean;
+      x: number;
+      y: number;
+    }) => {
+      if (!summary) return;
+      const absPath = joinPath(summary.path, args.relFromRoot);
+      setMenu({
+        x: args.x,
+        y: args.y,
+        absPath,
+        isDir: args.isDir,
+        deleted: args.deleted,
+        relFromRoot: args.relFromRoot,
+      });
+    },
+    [summary],
+  );
 
   // Treemap → App: rect was clicked.
   function onRectSelect(sel: SelectedRect) {
@@ -248,16 +315,12 @@ export default function App() {
               onSelect={onRectSelect}
               onDrillDown={(relPath) => applyFocus([...focus, ...relPath])}
               onContext={(sel, x, y) => {
-                if (!summary) return;
-                const relFromRoot = [...focus, ...sel.rect.rel_path];
-                const absPath = joinPath(summary.path, relFromRoot);
-                setMenu({
+                openContextMenu({
+                  relFromRoot: [...focus, ...sel.rect.rel_path],
+                  isDir: sel.rect.kind === "dir",
+                  deleted: sel.rect.deleted,
                   x,
                   y,
-                  absPath,
-                  isDir: sel.rect.kind === "dir",
-                  relFromRoot,
-                  deleted: sel.rect.deleted,
                 });
               }}
             />
@@ -279,6 +342,8 @@ export default function App() {
               setSelectedOther(null);
               setSelectedAbsPath(absPath);
             }}
+            onTreeContext={openContextMenu}
+            onRequestDelete={requestDelete}
             onClose={clearSelection}
           />
         )}
@@ -293,16 +358,14 @@ export default function App() {
           relFromRoot={menu.relFromRoot}
           onClose={() => setMenu(null)}
           onError={setError}
-          onDeleted={(relFromRoot) => {
-            // Bump scanEpoch so the treemap re-fetches and picks up the new
-            // `deleted` flags. Tree/Types tabs also keyed off scanEpoch will
-            // refresh — that's fine; child lists are cheap.
-            setScanEpoch((n) => n + 1);
-            // Keep the deleted node selected so the details panel shows the
-            // "deleted" badge instead of going blank.
-            setSelectedOther(null);
-            setSelectedAbsPath(relFromRoot);
-          }}
+          onRequestDelete={requestDelete}
+        />
+      )}
+      {confirm && (
+        <ConfirmDeleteDialog
+          state={confirm}
+          onCancel={() => setConfirm(null)}
+          onConfirm={performDelete}
         />
       )}
     </div>
@@ -349,6 +412,8 @@ function SidePanel({
   extFilter,
   onExtFilter,
   onTreeSelect,
+  onTreeContext,
+  onRequestDelete,
   onClose,
 }: {
   tab: Tab;
@@ -362,6 +427,14 @@ function SidePanel({
   extFilter: string | null;
   onExtFilter: (ext: string | null) => void;
   onTreeSelect: (absPath: string[]) => void;
+  onTreeContext: (args: {
+    relFromRoot: string[];
+    isDir: boolean;
+    deleted: boolean;
+    x: number;
+    y: number;
+  }) => void;
+  onRequestDelete: (req: ConfirmState) => void;
   onClose: () => void;
 }) {
   return (
@@ -387,6 +460,7 @@ function SidePanel({
             selectedOther={selectedOther}
             meta={selectedMeta}
             scanRootPath={scanRootPath}
+            onRequestDelete={onRequestDelete}
             onClose={onClose}
           />
         </TabPanel>
@@ -396,6 +470,7 @@ function SidePanel({
             scanRootName={scanRootName}
             selectedAbsPath={selectedAbsPath}
             onSelect={onTreeSelect}
+            onContext={onTreeContext}
           />
         </TabPanel>
         <TabPanel active={tab === "types"}>
@@ -458,12 +533,14 @@ function DetailsTab({
   selectedOther,
   meta,
   scanRootPath,
+  onRequestDelete,
   onClose,
 }: {
   selectedAbsPath: string[] | null;
   selectedOther: SelectedRect | null;
   meta: NodeMeta | null;
   scanRootPath: string;
+  onRequestDelete: (req: ConfirmState) => void;
   onClose: () => void;
 }) {
   if (selectedOther) {
@@ -497,23 +574,55 @@ function DetailsTab({
   const absPath = joinPath(scanRootPath, selectedAbsPath);
   const isDeleted = meta?.deleted ?? false;
   return (
-    <div className="h-full overflow-auto p-4">
-      <Header title={name} onClose={onClose} />
-      {isDeleted && (
-        <div className="mb-3 rounded border border-red-800/60 bg-red-950/40 px-2 py-1 text-[11px] font-medium text-red-300">
-          {isDir ? "Folder deleted" : "File deleted"}
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="flex-1 overflow-auto p-4">
+        <Header title={name} onClose={onClose} />
+        {isDeleted && (
+          <div className="mb-3 rounded border border-red-800/60 bg-red-950/40 px-2 py-1 text-[11px] font-medium text-red-300">
+            {isDir ? "Folder deleted" : "File deleted"}
+          </div>
+        )}
+        <dl className="space-y-2">
+          <Row label="Type" value={type} />
+          <Row label="Size" value={formatBytes(meta ? meta.size : 0)} />
+          <Row
+            label={isDir ? "Direct children" : "Items"}
+            value={(meta ? meta.child_count : 1).toLocaleString()}
+          />
+          <Row label="Modified" value={formatDate(meta ? meta.modified_ms : null)} />
+          <Row label="Path" value={absPath} mono />
+        </dl>
+      </div>
+      {!isDeleted && selectedAbsPath.length > 0 && (
+        <div className="flex shrink-0 gap-2 border-t border-zinc-800 bg-zinc-900/60 p-2">
+          <button
+            onClick={() =>
+              onRequestDelete({
+                kind: "trash",
+                absPath,
+                isDir,
+                relFromRoot: selectedAbsPath,
+              })
+            }
+            className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+          >
+            Move to Trash…
+          </button>
+          <button
+            onClick={() =>
+              onRequestDelete({
+                kind: "delete",
+                absPath,
+                isDir,
+                relFromRoot: selectedAbsPath,
+              })
+            }
+            className="flex-1 rounded border border-red-800 bg-red-950/60 px-2 py-1 text-xs text-red-300 hover:bg-red-900/70"
+          >
+            Delete permanently…
+          </button>
         </div>
       )}
-      <dl className="space-y-2">
-        <Row label="Type" value={type} />
-        <Row label="Size" value={formatBytes(meta ? meta.size : 0)} />
-        <Row
-          label={isDir ? "Direct children" : "Items"}
-          value={(meta ? meta.child_count : 1).toLocaleString()}
-        />
-        <Row label="Modified" value={formatDate(meta ? meta.modified_ms : null)} />
-        <Row label="Path" value={absPath} mono />
-      </dl>
     </div>
   );
 }
@@ -549,11 +658,19 @@ function TreeTab({
   scanRootName,
   selectedAbsPath,
   onSelect,
+  onContext,
 }: {
   scanEpoch: number;
   scanRootName: string;
   selectedAbsPath: string[] | null;
   onSelect: (absPath: string[]) => void;
+  onContext: (args: {
+    relFromRoot: string[];
+    isDir: boolean;
+    deleted: boolean;
+    x: number;
+    y: number;
+  }) => void;
 }) {
   // Cache: pathKey -> children list. Survives tab switches; cleared on new scan.
   const [cache, setCache] = useState<Map<string, ChildEntry[]>>(new Map());
@@ -678,11 +795,13 @@ function TreeTab({
         size={null}
         isDir
         hasChildren={(rootChildren?.length ?? 0) > 0}
+        deleted={false}
         isOpen={expanded.has(rootKey)}
         loading={pendingFetches.has(rootKey)}
         selected={rootSelected}
         onToggle={() => toggle([])}
         onSelect={() => onSelect([])}
+        onContext={(x, y) => onContext({ relFromRoot: [], isDir: true, deleted: false, x, y })}
         registerEl={rootSelected ? setRowEl : undefined}
       />
       {expanded.has(rootKey) && rootChildren && (
@@ -697,6 +816,7 @@ function TreeTab({
           registerSelectedEl={setRowEl}
           onToggle={toggle}
           onSelect={onSelect}
+          onContext={onContext}
         />
       )}
     </div>
@@ -714,6 +834,7 @@ function TreeChildren({
   registerSelectedEl,
   onToggle,
   onSelect,
+  onContext,
 }: {
   parentPath: string[];
   children: ChildEntry[];
@@ -725,6 +846,13 @@ function TreeChildren({
   registerSelectedEl: (el: HTMLDivElement | null) => void;
   onToggle: (path: string[]) => void;
   onSelect: (path: string[]) => void;
+  onContext: (args: {
+    relFromRoot: string[];
+    isDir: boolean;
+    deleted: boolean;
+    x: number;
+    y: number;
+  }) => void;
 }) {
   return (
     <>
@@ -745,11 +873,15 @@ function TreeChildren({
               size={c.size}
               isDir={c.is_dir}
               hasChildren={c.has_children}
+              deleted={c.deleted}
               isOpen={isOpen}
               loading={pending.has(key)}
               selected={isSelected}
               onToggle={() => onToggle(path)}
               onSelect={() => onSelect(path)}
+              onContext={(x, y) =>
+                onContext({ relFromRoot: path, isDir: c.is_dir, deleted: c.deleted, x, y })
+              }
               registerEl={isSelected ? registerSelectedEl : undefined}
             />
             {isOpen && grandChildren && (
@@ -764,6 +896,7 @@ function TreeChildren({
                 registerSelectedEl={registerSelectedEl}
                 onToggle={onToggle}
                 onSelect={onSelect}
+                onContext={onContext}
               />
             )}
           </div>
@@ -779,11 +912,13 @@ function TreeRow({
   size,
   isDir,
   hasChildren,
+  deleted,
   isOpen,
   loading,
   selected,
   onToggle,
   onSelect,
+  onContext,
   registerEl,
 }: {
   depth: number;
@@ -791,20 +926,27 @@ function TreeRow({
   size: number | null;
   isDir: boolean;
   hasChildren: boolean;
+  deleted: boolean;
   isOpen: boolean;
   loading: boolean;
   selected: boolean;
   onToggle: () => void;
   onSelect: () => void;
+  onContext: (x: number, y: number) => void;
   registerEl?: (el: HTMLDivElement | null) => void;
 }) {
   const swatch = colorFor(name, isDir);
   return (
     <div
       ref={registerEl}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onSelect();
+        onContext(e.clientX, e.clientY);
+      }}
       className={`flex items-center gap-1 pr-2 ${
         selected ? "bg-blue-900/40 text-zinc-100" : "text-zinc-300 hover:bg-zinc-800/60"
-      }`}
+      } ${deleted ? "text-red-400/70 line-through decoration-red-500/70" : ""}`}
       style={{ paddingLeft: 4 + depth * 12 }}
     >
       <button
@@ -816,7 +958,9 @@ function TreeRow({
         {isDir && hasChildren ? (loading ? "…" : isOpen ? "▾" : "▸") : ""}
       </button>
       <span
-        className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30"
+        className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30 ${
+          deleted ? "opacity-30" : ""
+        }`}
         style={{ background: swatch }}
       />
       <button
@@ -845,7 +989,7 @@ function ContextMenu({
   relFromRoot,
   onClose,
   onError,
-  onDeleted,
+  onRequestDelete,
 }: {
   x: number;
   y: number;
@@ -855,25 +999,13 @@ function ContextMenu({
   relFromRoot: string[];
   onClose: () => void;
   onError: (msg: string) => void;
-  onDeleted: (relFromRoot: string[]) => void;
+  onRequestDelete: (req: ConfirmState) => void;
 }) {
   async function run(cmd: string) {
     try {
-      if (cmd === "trash") {
-        const ok = window.confirm(`Move to Trash?\n\n${path}`);
-        if (!ok) return;
-        await invoke("move_to_trash", { path });
-        await invoke("mark_path_deleted", { relPath: relFromRoot }).catch(() => {});
-        onDeleted(relFromRoot);
-      } else if (cmd === "delete") {
-        const noun = isDir ? "folder and ALL its contents" : "file";
-        const ok = window.confirm(
-          `Permanently delete this ${noun}?\n\n${path}\n\nThis cannot be undone — the trash is bypassed.`,
-        );
-        if (!ok) return;
-        await invoke("delete_permanent", { path });
-        await invoke("mark_path_deleted", { relPath: relFromRoot }).catch(() => {});
-        onDeleted(relFromRoot);
+      if (cmd === "trash" || cmd === "delete") {
+        onRequestDelete({ kind: cmd, absPath: path, isDir, relFromRoot });
+        return; // dialog closes the menu
       } else if (cmd === "reveal") {
         await invoke("reveal_in_finder", { path });
       } else if (cmd === "open") {
@@ -902,6 +1034,63 @@ function ContextMenu({
           <MenuItem label="Delete permanently…" danger onClick={() => run("delete")} />
         </>
       )}
+    </div>
+  );
+}
+
+function ConfirmDeleteDialog({
+  state,
+  onCancel,
+  onConfirm,
+}: {
+  state: ConfirmState;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const noun = state.isDir ? "folder" : "file";
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onCancel();
+      else if (e.key === "Enter") onConfirm();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, onConfirm]);
+
+  return (
+    <div
+      className="fixed inset-0 z-30 grid place-items-center bg-black/60"
+      onMouseDown={onCancel}
+    >
+      <div
+        className="w-[28rem] max-w-[90vw] rounded-lg border border-red-700/70 bg-zinc-900 p-5 shadow-2xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-sm font-semibold text-red-400">
+          Permanently delete this {noun}?
+        </h2>
+        <p className="mt-2 break-all font-mono text-xs text-zinc-400">{state.absPath}</p>
+        <p className="mt-3 text-xs text-red-300">
+          This bypasses the Trash and cannot be undone.
+          {state.isDir && " The entire folder and all its contents will be removed."}
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="rounded bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-700"
+          >
+            Cancel
+          </button>
+          <button
+            autoFocus
+            onClick={onConfirm}
+            className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500"
+          >
+            Delete permanently
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

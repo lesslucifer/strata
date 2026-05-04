@@ -37,6 +37,7 @@ fn list_children(
                     size: c.size,
                     is_dir: c.is_dir,
                     has_children: !c.children.is_empty(),
+                    deleted: c.deleted,
                 })
                 .collect();
             entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));

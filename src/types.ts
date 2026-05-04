@@ -43,6 +43,7 @@ export interface ChildEntry {
   size: number;
   is_dir: boolean;
   has_children: boolean;
+  deleted: boolean;
 }
 
 export interface TypeStat {
