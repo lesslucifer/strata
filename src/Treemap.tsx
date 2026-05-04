@@ -111,15 +111,18 @@ export function Treemap({
     if (!hatchRef.current) hatchRef.current = makeHatchPattern(ctx);
 
     for (const r of rects) {
+      let baseColor: string;
       if (r.kind === "other") {
-        ctx.fillStyle = "rgb(50, 50, 55)";
+        baseColor = "rgb(50, 50, 55)";
+        ctx.fillStyle = baseColor;
         ctx.fillRect(r.x, r.y, r.w, r.h);
         if (hatchRef.current) {
           ctx.fillStyle = hatchRef.current;
           ctx.fillRect(r.x, r.y, r.w, r.h);
         }
       } else {
-        ctx.fillStyle = colorFor(r.name, r.kind === "dir");
+        baseColor = colorFor(r.name, r.kind === "dir");
+        ctx.fillStyle = baseColor;
         ctx.fillRect(r.x, r.y, r.w, r.h);
       }
       // Cushion edges
@@ -131,11 +134,12 @@ export function Treemap({
         ctx.fillRect(r.x, r.y + r.h - 1, r.w, 1);
         ctx.fillRect(r.x + r.w - 1, r.y, 1, r.h);
       }
-      // Dim non-matching rects when a type filter is active.
-      if (extFilter !== null && !rectMatchesExt(r, extFilter)) {
+      const dim = extFilter !== null && !rectMatchesExt(r, extFilter);
+      if (dim) {
         ctx.fillStyle = "rgba(20, 20, 22, 0.72)";
         ctx.fillRect(r.x, r.y, r.w, r.h);
       }
+      drawLabel(ctx, r, baseColor, dim);
     }
 
     const outline = findOutline(rects, selectedRelPath, selectedOther);
@@ -279,6 +283,116 @@ function pathStartsWith(path: string[], prefix: string[]): boolean {
     if (path[i] !== prefix[i]) return false;
   }
   return true;
+}
+
+// Inline label thresholds. Width/height below these means we skip drawing
+// entirely; otherwise we show name only, or name + size if both fit.
+const LABEL_MIN_W = 44;
+const LABEL_MIN_H = 16;
+const LABEL_SIZE_MIN_W = 60;
+const LABEL_SIZE_MIN_H = 30;
+const LABEL_PAD_X = 4;
+const LABEL_PAD_Y = 3;
+
+function drawLabel(
+  ctx: CanvasRenderingContext2D,
+  r: RenderRect,
+  baseColor: string,
+  dim: boolean,
+) {
+  if (r.w < LABEL_MIN_W || r.h < LABEL_MIN_H) return;
+  const showName = r.w >= LABEL_SIZE_MIN_W && r.h >= LABEL_SIZE_MIN_H;
+
+  // Effective fill color after the dim overlay (rgba 20,20,22 @ .72 over base).
+  const eff = dim ? mixOver(baseColor, [20, 20, 22], 0.72) : parseColor(baseColor);
+  const light = eff ? relativeLuminance(eff) > 0.45 : false;
+  const fg = light ? "rgba(0,0,0,0.85)" : "rgba(255,255,255,0.92)";
+  const fgDim = light ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.65)";
+
+  const innerW = r.w - LABEL_PAD_X * 2;
+  const sz = r.kind === "other" ? `+${r.other_count} · ${formatBytes(r.size)}` : formatBytes(r.size);
+  ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = fg;
+  const sizeFitted = fitText(ctx, sz, innerW);
+  if (!sizeFitted) return;
+  ctx.fillText(sizeFitted, r.x + LABEL_PAD_X, r.y + LABEL_PAD_Y);
+
+  if (showName && r.kind !== "other") {
+    ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillStyle = fgDim;
+    const nameFitted = fitText(ctx, r.name, innerW);
+    if (nameFitted) {
+      ctx.fillText(nameFitted, r.x + LABEL_PAD_X, r.y + LABEL_PAD_Y + 13);
+    }
+  }
+}
+
+function fitText(
+  ctx: CanvasRenderingContext2D,
+  s: string,
+  maxWidth: number,
+): string | null {
+  if (maxWidth <= 0) return null;
+  if (ctx.measureText(s).width <= maxWidth) return s;
+  const ell = "…";
+  const ellW = ctx.measureText(ell).width;
+  if (ellW > maxWidth) return null;
+  let lo = 0;
+  let hi = s.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ctx.measureText(s.slice(0, mid)).width + ellW <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  if (lo === 0) return null;
+  return s.slice(0, lo) + ell;
+}
+
+type RGB = [number, number, number];
+
+function parseColor(c: string): RGB | null {
+  const m = c.match(/^hsl\(\s*([-\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)$/);
+  if (m) return hslToRgb(parseFloat(m[1]), parseFloat(m[2]) / 100, parseFloat(m[3]) / 100);
+  const r = c.match(/^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/);
+  if (r) return [parseInt(r[1], 10), parseInt(r[2], 10), parseInt(r[3], 10)];
+  return null;
+}
+
+function hslToRgb(h: number, s: number, l: number): RGB {
+  h = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  return [
+    Math.round((r + m) * 255),
+    Math.round((g + m) * 255),
+    Math.round((b + m) * 255),
+  ];
+}
+
+function mixOver(base: string, over: RGB, overAlpha: number): RGB | null {
+  const b = parseColor(base);
+  if (!b) return null;
+  return [
+    Math.round(b[0] * (1 - overAlpha) + over[0] * overAlpha),
+    Math.round(b[1] * (1 - overAlpha) + over[1] * overAlpha),
+    Math.round(b[2] * (1 - overAlpha) + over[2] * overAlpha),
+  ];
+}
+
+function relativeLuminance([r, g, b]: RGB): number {
+  // Perceptual brightness (Rec. 709 weights), 0..1.
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 }
 
 function makeHatchPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
