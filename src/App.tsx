@@ -18,6 +18,16 @@ function pathKey(p: string[]): string {
   return p.join(PATH_SEP);
 }
 
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.userAgent);
+function hasMod(e: KeyboardEvent): boolean {
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}
+function isTypingTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false;
+  const tag = t.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
+}
+
 interface ContextMenuState {
   x: number;
   y: number;
@@ -203,6 +213,154 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
     };
   }, [menu]);
+
+  // Global keyboard shortcuts. Skipped while a dialog/menu/typing field is
+  // active so their own handlers (Esc/Enter) win.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (isTypingTarget(e.target)) return;
+      const dialogOpen = confirm !== null || menu !== null || groupSettingsOpen;
+
+      // Cmd+, opens grouping settings even over other modals (matches macOS).
+      if (hasMod(e) && e.key === ",") {
+        e.preventDefault();
+        setGroupSettingsOpen(true);
+        return;
+      }
+
+      if (dialogOpen) return;
+
+      // Cmd+O — pick & scan
+      if (hasMod(e) && (e.key === "o" || e.key === "O") && !e.shiftKey) {
+        e.preventDefault();
+        void pickAndScan();
+        return;
+      }
+
+      // Esc / Cmd+. during scan → cancel
+      if (scanning && (e.key === "Escape" || (hasMod(e) && e.key === "."))) {
+        e.preventDefault();
+        void cancelScan();
+        return;
+      }
+
+      if (!summary) return;
+
+      // Tab switching
+      if (hasMod(e) && !e.shiftKey && !e.altKey) {
+        if (e.key === "1") {
+          e.preventDefault();
+          setTab("details");
+          return;
+        }
+        if (e.key === "2") {
+          e.preventDefault();
+          setTab("tree");
+          return;
+        }
+        if (e.key === "3") {
+          e.preventDefault();
+          setTab("types");
+          return;
+        }
+      }
+
+      // Esc cascade: ext filter → selection
+      if (e.key === "Escape") {
+        if (extFilter !== null) {
+          e.preventDefault();
+          setExtFilter(null);
+          return;
+        }
+        if (selectedAbsPath !== null || selectedOther !== null) {
+          e.preventDefault();
+          clearSelection();
+          return;
+        }
+        return;
+      }
+
+      // Drill up — Backspace or Cmd+Up
+      if (
+        (e.key === "Backspace" && !hasMod(e)) ||
+        (hasMod(e) && e.key === "ArrowUp" && !e.shiftKey)
+      ) {
+        if (focus.length > 0) {
+          e.preventDefault();
+          applyFocus(focus.slice(0, -1));
+        }
+        return;
+      }
+
+      // Jump to root — Cmd+Shift+Up
+      if (hasMod(e) && e.shiftKey && e.key === "ArrowUp") {
+        if (focus.length > 0) {
+          e.preventDefault();
+          applyFocus([]);
+        }
+        return;
+      }
+
+      // Drill down into selected folder — Enter or Cmd+Down
+      if (
+        (e.key === "Enter" && !hasMod(e)) ||
+        (hasMod(e) && e.key === "ArrowDown" && !e.shiftKey)
+      ) {
+        if (selectedMeta?.is_dir && selectedAbsPath) {
+          const rel = selectedAbsPath.slice(focus.length);
+          if (rel.length > 0) {
+            e.preventDefault();
+            applyFocus([...focus, ...rel]);
+          }
+        }
+        return;
+      }
+
+      // Per-item actions require a selected, non-deleted item.
+      if (!selectedAbsPath || !selectedMeta || selectedMeta.deleted) return;
+      const absPath = joinPath(summary.path, selectedAbsPath);
+      const isDir = selectedMeta.is_dir;
+
+      // Cmd+R — Reveal in Finder
+      if (hasMod(e) && (e.key === "r" || e.key === "R") && !e.shiftKey) {
+        e.preventDefault();
+        void invoke("reveal_in_finder", { path: absPath }).catch((err) =>
+          setError(String(err)),
+        );
+        return;
+      }
+
+      // Cmd+Enter — Open
+      if (hasMod(e) && e.key === "Enter") {
+        e.preventDefault();
+        void invoke("open_path", { path: absPath }).catch((err) => setError(String(err)));
+        return;
+      }
+
+      // Delete / Cmd+Backspace — Move to Trash (no confirm)
+      // Cmd+Shift+Backspace — Delete Permanently (with confirm)
+      if (e.key === "Delete" || (hasMod(e) && e.key === "Backspace")) {
+        if (selectedAbsPath.length === 0) return; // can't delete the scan root
+        e.preventDefault();
+        const kind: ConfirmKind = e.shiftKey ? "delete" : "trash";
+        requestDelete({ kind, absPath, isDir, relFromRoot: selectedAbsPath });
+        return;
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    confirm,
+    menu,
+    groupSettingsOpen,
+    scanning,
+    summary,
+    focus,
+    extFilter,
+    selectedAbsPath,
+    selectedOther,
+    selectedMeta,
+  ]);
 
   // Derive the rect-relative selection (relative to current focus) from the
   // absolute path. Returns null if the selection isn't under the current focus.
