@@ -111,10 +111,17 @@ export default function App() {
     }
   }, []);
 
+  // Set when the user clicks cancel; the in-flight scan_directory call will
+  // resolve with a "cancelled" error which we then swallow (silent reset to
+  // init state). A ref so the async finally-block sees the latest value
+  // without re-triggering effects.
+  const cancelRequestedRef = useRef(false);
+
   async function pickAndScan() {
     setError(null);
     const picked = await open({ directory: true, multiple: false });
     if (!picked || typeof picked !== "string") return;
+    cancelRequestedRef.current = false;
     setScanning(true);
     setFocus([]);
     setExtFilter(null);
@@ -123,15 +130,22 @@ export default function App() {
     setSummary(null);
 
     const unlisten = await listen<ScanProgress>("scan-progress", (e) => {
+      // Drop any straggler progress events that arrive after the user cancels.
+      if (cancelRequestedRef.current) return;
       setProgress(e.payload);
     });
 
     try {
       const res = await invoke<ScanSummary>("scan_directory", { path: picked });
+      if (cancelRequestedRef.current) return;
       setSummary(res);
       setScanEpoch((n) => n + 1);
     } catch (e) {
-      setError(String(e));
+      // Cancellation is a normal flow, not an error: drop the message and
+      // return to the init state.
+      if (!cancelRequestedRef.current) {
+        setError(String(e));
+      }
     } finally {
       unlisten();
       setScanning(false);
@@ -140,6 +154,11 @@ export default function App() {
   }
 
   async function cancelScan() {
+    cancelRequestedRef.current = true;
+    // Snap UI back to init immediately — don't wait for the backend to unwind.
+    setScanning(false);
+    setProgress(null);
+    setError(null);
     try {
       await invoke("cancel_scan");
     } catch {

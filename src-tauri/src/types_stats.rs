@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -34,16 +35,26 @@ pub async fn compute_type_stats(
 
 /// Walks the tree in parallel and aggregates file sizes/counts by lowercased ext.
 pub fn compute(root: &Node) -> Vec<TypeStat> {
-    let acc = walk_par(root);
+    let never = AtomicBool::new(false);
+    compute_cancellable(root, &never).expect("non-cancellable compute returned None")
+}
+
+/// Cancellable variant: returns `None` if `cancel` flips during the walk so the
+/// caller can bail immediately instead of paying for a full traversal.
+pub fn compute_cancellable(root: &Node, cancel: &AtomicBool) -> Option<Vec<TypeStat>> {
+    let acc = walk_par(root, cancel);
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let mut out: Vec<TypeStat> = acc
         .into_iter()
         .map(|(ext, (size, count))| TypeStat { ext, size, count })
         .collect();
     out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.ext.cmp(&b.ext)));
-    out
+    Some(out)
 }
 
-fn walk_par(root: &Node) -> HashMap<String, (u64, u64)> {
+fn walk_par(root: &Node, cancel: &AtomicBool) -> HashMap<String, (u64, u64)> {
     // Parallelize across top-level children. Each thread builds a local map;
     // we then merge. For balanced trees this is near-linear scaling.
     if root.is_dir && !root.children.is_empty() {
@@ -51,13 +62,13 @@ fn walk_par(root: &Node) -> HashMap<String, (u64, u64)> {
             .par_iter()
             .map(|c| {
                 let mut local = HashMap::new();
-                walk_into(c, &mut local);
+                walk_into(c, &mut local, cancel);
                 local
             })
             .reduce(HashMap::new, merge)
     } else {
         let mut local = HashMap::new();
-        walk_into(root, &mut local);
+        walk_into(root, &mut local, cancel);
         local
     }
 }
@@ -77,7 +88,7 @@ fn merge(
     a
 }
 
-fn walk_into(node: &Node, acc: &mut HashMap<String, (u64, u64)>) {
+fn walk_into(node: &Node, acc: &mut HashMap<String, (u64, u64)>, cancel: &AtomicBool) {
     if !node.is_dir {
         let ext = ext_of(&node.name);
         let entry = acc.entry(ext).or_insert((0, 0));
@@ -85,8 +96,11 @@ fn walk_into(node: &Node, acc: &mut HashMap<String, (u64, u64)>) {
         entry.1 += 1;
         return;
     }
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
     for c in &node.children {
-        walk_into(c, acc);
+        walk_into(c, acc, cancel);
     }
 }
 
@@ -120,6 +134,7 @@ mod tests {
             is_dir: false,
             modified_ms: None,
             children: vec![],
+            deleted: false,
         }
     }
     fn dir(name: &str, children: Vec<Node>) -> Node {
@@ -130,6 +145,7 @@ mod tests {
             is_dir: true,
             modified_ms: None,
             children,
+            deleted: false,
         }
     }
 

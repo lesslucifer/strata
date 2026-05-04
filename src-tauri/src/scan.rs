@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -63,8 +63,12 @@ pub async fn scan_directory(
     // Walk + tree-build + type-stats all run on the blocking pool so the IPC
     // worker stays free. The type-stat precompute means the Types tab is
     // instant on first open.
-    let (root, type_stats, file_count, dir_count) = tauri::async_runtime::spawn_blocking(move || {
-        let (entries, totals) = walk(&scan_path, &app_for_blocking, &cancel_handle);
+    let cancel_for_blocking = Arc::clone(&cancel_handle);
+    let result = tauri::async_runtime::spawn_blocking(move || -> Option<_> {
+        let (entries, totals) = walk(&scan_path, &app_for_blocking, &cancel_for_blocking);
+        if cancel_for_blocking.load(Ordering::Relaxed) {
+            return None;
+        }
         let mut files = 0u64;
         let mut dirs = 0u64;
         for e in &entries {
@@ -77,17 +81,21 @@ pub async fn scan_directory(
         // Phase: building tree. Frontend uses this to switch the label
         // and freeze the live type-mix bar at its final values.
         emit_phase(&app_for_blocking, "building", &totals);
-        let root = build_tree(&scan_path, entries);
+        let root = build_tree(&scan_path, entries, &cancel_for_blocking)?;
+        if cancel_for_blocking.load(Ordering::Relaxed) {
+            return None;
+        }
         emit_phase(&app_for_blocking, "indexing", &totals);
-        let stats = crate::types_stats::compute(&root);
-        (root, stats, files, dirs)
+        let stats = crate::types_stats::compute_cancellable(&root, &cancel_for_blocking)?;
+        Some((root, stats, files, dirs))
     })
     .await
     .map_err(|e| format!("scan task panicked: {e}"))?;
 
-    if cancel.is_cancelled() {
+    if cancel.is_cancelled() || result.is_none() {
         return Err("cancelled".into());
     }
+    let (root, type_stats, file_count, dir_count) = result.unwrap();
 
     let summary = ScanSummary {
         path: p.to_string_lossy().to_string(),
@@ -240,7 +248,7 @@ fn emit_phase(app: &AppHandle, phase: &str, totals: &WalkTotals) {
     );
 }
 
-fn build_tree(root_path: &Path, entries: Vec<EntryInfo>) -> Node {
+fn build_tree(root_path: &Path, entries: Vec<EntryInfo>, cancel: &AtomicBool) -> Option<Node> {
     let mut by_parent: HashMap<PathBuf, Vec<EntryInfo>> = HashMap::new();
     let mut root_modified: Option<u64> = None;
     for e in entries {
@@ -252,7 +260,7 @@ fn build_tree(root_path: &Path, entries: Vec<EntryInfo>) -> Node {
             by_parent.entry(parent.to_path_buf()).or_default().push(e);
         }
     }
-    build_node(root_path, root_modified, &mut by_parent, true)
+    build_node(root_path, root_modified, &mut by_parent, true, cancel)
 }
 
 fn build_node(
@@ -260,29 +268,34 @@ fn build_node(
     modified_ms: Option<u64>,
     by_parent: &mut HashMap<PathBuf, Vec<EntryInfo>>,
     is_dir: bool,
-) -> Node {
+    cancel: &AtomicBool,
+) -> Option<Node> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
 
     if !is_dir {
-        return Node {
+        return Some(Node {
             name,
             size: 0,
             is_dir: false,
             modified_ms,
             children: Vec::new(),
             deleted: false,
-        };
+        });
     }
 
     let mut children = Vec::new();
     let mut total: u64 = 0;
     if let Some(child_entries) = by_parent.remove(path) {
+        // Check cancel periodically to bail out of large directory trees fast.
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         for ce in child_entries {
             let child_node = if ce.is_dir {
-                build_node(&ce.path, ce.modified_ms, by_parent, true)
+                build_node(&ce.path, ce.modified_ms, by_parent, true, cancel)?
             } else {
                 Node {
                     name: ce
@@ -304,12 +317,12 @@ fn build_node(
     // Sort once at build time so the layout step doesn't re-sort.
     children.sort_unstable_by(|a, b| b.size.cmp(&a.size));
 
-    Node {
+    Some(Node {
         name,
         size: total,
         is_dir: true,
         modified_ms,
         children,
         deleted: false,
-    }
+    })
 }
