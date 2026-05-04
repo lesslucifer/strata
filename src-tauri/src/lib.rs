@@ -41,7 +41,11 @@ fn list_children(
                     deleted: c.deleted,
                 })
                 .collect();
-            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            entries.sort_by(|a, b| {
+                b.size
+                    .cmp(&a.size)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
             entries
         })
         .ok_or_else(|| "no scan loaded or path not found".into())
