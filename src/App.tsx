@@ -585,7 +585,7 @@ function DetailsTab({
             value={(meta ? meta.child_count : 1).toLocaleString()}
           />
           <Row label="Last modified" value={formatDate(meta ? meta.modified_ms : null)} />
-          <Row label="Location" value={absPath} mono />
+          <LocationRow absPath={absPath} />
         </dl>
       </div>
       {!isDeleted && selectedAbsPath.length > 0 && (
@@ -642,6 +642,54 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
     <div>
       <dt className="text-zinc-500">{label}</dt>
       <dd className={`break-all text-zinc-200 ${mono ? "font-mono" : ""}`}>{value}</dd>
+    </div>
+  );
+}
+
+function LocationRow({ absPath }: { absPath: string }) {
+  // Split into segments while preserving the leading "/" semantics. On POSIX,
+  // an empty first chunk from the leading slash becomes the root segment.
+  const parts = absPath.split("/");
+  const segments: { label: string; path: string }[] = [];
+  let acc = "";
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (i === 0 && p === "") {
+      // Leading slash: represent as root "/"
+      acc = "/";
+      segments.push({ label: "/", path: "/" });
+      continue;
+    }
+    if (p === "") continue; // skip empty chunks from trailing or duplicate slashes
+    acc = acc === "/" ? `/${p}` : `${acc}/${p}`;
+    segments.push({ label: p, path: acc });
+  }
+
+  async function reveal(path: string) {
+    try {
+      await invoke("reveal_in_finder", { path });
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <div>
+      <dt className="text-zinc-500">Location</dt>
+      <dd className="break-all font-mono text-zinc-200">
+        {segments.map((s, i) => (
+          <span key={i}>
+            {i > 0 && s.label !== "/" && <span className="text-zinc-600">/</span>}
+            <button
+              onClick={() => reveal(s.path)}
+              className="rounded px-0.5 hover:bg-zinc-800 hover:text-white"
+              title={`Reveal ${s.path} in Finder`}
+            >
+              {s.label}
+            </button>
+          </span>
+        ))}
+      </dd>
     </div>
   );
 }

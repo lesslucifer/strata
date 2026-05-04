@@ -1,10 +1,12 @@
 [package]
 name = "strata"
-version = "0.1.0"
+version = "0.2.0"
 description = "Strata — Visualize disk usage as an interactive treemap."
 authors = ["The Strata Contributors"]
 edition = "2021"
 rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/lesslucifer/strata"
 
 [lib]
 name = "strata_lib"
