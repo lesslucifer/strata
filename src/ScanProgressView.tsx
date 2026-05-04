@@ -10,7 +10,7 @@ interface Props {
 
 const PHASE_LABEL: Record<string, string> = {
   walking: "Scanning files…",
-  building: "Building tree…",
+  building: "Building directory tree…",
   indexing: "Indexing file types…",
 };
 
@@ -43,7 +43,7 @@ export function ScanProgressView({ progress, onCancel }: Props) {
                 }`}
               />
               <span className="text-sm font-medium tracking-wide text-zinc-200">
-                {PHASE_LABEL[phase] ?? "Scanning…"}
+                {PHASE_LABEL[phase] ?? "Working…"}
               </span>
             </div>
             <button
@@ -57,7 +57,7 @@ export function ScanProgressView({ progress, onCancel }: Props) {
           {progress?.current_path && isWalking && (
             <div className="w-full" title={progress.current_path}>
               <div className="text-[10px] uppercase tracking-wider text-zinc-500">
-                Current path
+                Currently scanning
               </div>
               <div className="mt-1 truncate font-mono text-xs text-zinc-300">
                 {progress.current_path}
@@ -68,13 +68,13 @@ export function ScanProgressView({ progress, onCancel }: Props) {
           <div className="grid w-full grid-cols-3 gap-4 text-center">
             <Stat label="Files" value={(progress?.files ?? 0).toLocaleString()} />
             <Stat label="Folders" value={(progress?.dirs ?? 0).toLocaleString()} />
-            <Stat label="Size" value={formatBytes(totalBytes)} />
+            <Stat label="Total Size" value={formatBytes(totalBytes)} />
           </div>
 
           <div className="w-full">
             <div className="mb-2 flex items-baseline justify-between text-[11px] uppercase tracking-wider text-zinc-500">
-              <span>By file type</span>
-              {!isWalking && <span className="text-zinc-600">final</span>}
+              <span>Distribution by File Type</span>
+              {!isWalking && <span className="text-zinc-600">Complete</span>}
             </div>
             <TypeMixBar segments={segments} totalBytes={totalBytes} pulsing={isWalking} />
             <Legend segments={visible} totalBytes={totalBytes} />

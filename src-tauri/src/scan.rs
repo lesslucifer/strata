@@ -48,10 +48,10 @@ pub async fn scan_directory(
 ) -> Result<ScanSummary, String> {
     let p = PathBuf::from(&path);
     if !p.exists() {
-        return Err(format!("path does not exist: {path}"));
+        return Err(format!("Path does not exist: {path}"));
     }
     if !p.is_dir() {
-        return Err(format!("path is not a directory: {path}"));
+        return Err(format!("Path is not a directory: {path}"));
     }
 
     cancel.reset();
@@ -90,7 +90,7 @@ pub async fn scan_directory(
         Some((root, stats, files, dirs))
     })
     .await
-    .map_err(|e| format!("scan task panicked: {e}"))?;
+    .map_err(|e| format!("Scan task failed unexpectedly: {e}"))?;
 
     if cancel.is_cancelled() || result.is_none() {
         return Err("cancelled".into());

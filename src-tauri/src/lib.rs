@@ -20,7 +20,7 @@ fn get_node_meta(
             child_count: n.children.len() as u64,
             deleted: n.deleted,
         })
-        .ok_or_else(|| "no scan loaded or path not found".into())
+        .ok_or_else(|| "No scan is currently loaded, or the path could not be found.".into())
 }
 
 #[tauri::command]
@@ -48,7 +48,7 @@ fn list_children(
             });
             entries
         })
-        .ok_or_else(|| "no scan loaded or path not found".into())
+        .ok_or_else(|| "No scan is currently loaded, or the path could not be found.".into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

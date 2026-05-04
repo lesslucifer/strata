@@ -29,3 +29,12 @@ export function formatDate(ms: number | null): string {
   if (ms == null) return "—";
   return new Date(ms).toLocaleString();
 }
+
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 0 : 1)} s`;
+  const minutes = Math.floor(seconds / 60);
+  const remSeconds = Math.round(seconds - minutes * 60);
+  return `${minutes} min ${remSeconds} s`;
+}

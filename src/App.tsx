@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ChildEntry, NodeMeta, ScanProgress, ScanSummary } from "./types";
-import { formatBytes, formatDate, joinPath } from "./util";
+import { formatBytes, formatDate, formatDuration, joinPath } from "./util";
 import { colorFor, extOf } from "./colors";
 import { Treemap, type SelectedRect } from "./Treemap";
 import { TypesTab } from "./TypesTab";
@@ -258,7 +258,7 @@ export default function App() {
             onClick={pickAndScan}
             className="rounded bg-blue-600 px-3 py-1 text-xs font-medium hover:bg-blue-500"
           >
-            Choose folder
+            Select Folder
           </button>
           <Breadcrumb
             rootName={summary.root_name}
@@ -267,13 +267,13 @@ export default function App() {
           />
           {extFilter !== null && (
             <FilterChip
-              label={extFilter === "" ? "(no ext)" : `.${extFilter}`}
+              label={extFilter === "" ? "No extension" : `.${extFilter}`}
               onClear={() => setExtFilter(null)}
             />
           )}
           <span className="ml-auto text-xs text-zinc-400">
-            {formatBytes(summary.root_size)} · scanned in {summary.elapsed_ms} ms ·{" "}
-            {summary.file_count.toLocaleString()} files
+            {formatBytes(summary.root_size)} · {summary.file_count.toLocaleString()} files ·
+            scanned in {formatDuration(summary.elapsed_ms)}
           </span>
         </header>
       )}
@@ -282,14 +282,17 @@ export default function App() {
           {error && <div className="p-4 text-sm text-red-400">Error: {error}</div>}
           {showEmptyState && (
             <div className="grid h-full place-items-center">
-              <div className="flex flex-col items-center gap-4">
-                <h1 className="text-2xl font-semibold tracking-wide">Strata</h1>
-                <p className="text-sm text-zinc-500">Pick a folder to analyze its disk usage.</p>
+              <div className="flex max-w-md flex-col items-center gap-5 px-6 text-center">
+                <h1 className="text-3xl font-semibold tracking-tight text-zinc-100">Strata</h1>
+                <p className="text-sm leading-relaxed text-zinc-400">
+                  Visualize disk usage as an interactive treemap. Select a folder to begin
+                  analyzing its contents.
+                </p>
                 <button
                   onClick={pickAndScan}
                   className="rounded bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-500"
                 >
-                  Choose folder
+                  Select Folder
                 </button>
               </div>
             </div>
@@ -484,14 +487,14 @@ function TabPanel({ active, children }: { active: boolean; children: React.React
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
     <span className="inline-flex items-center gap-1 rounded border border-blue-700 bg-blue-900/40 px-2 py-0.5 text-xs text-blue-100">
-      <span className="text-blue-300">Type:</span>
+      <span className="text-blue-300">Filtered by:</span>
       <span className="font-mono">{label}</span>
       <button
         onClick={onClear}
         className="ml-1 text-blue-300 hover:text-white"
-        aria-label="Clear type filter"
+        aria-label="Clear filter"
       >
-        ✕
+        ×
       </button>
     </span>
   );
@@ -541,28 +544,28 @@ function DetailsTab({
       <div className="h-full overflow-auto p-4">
         <Header title={r.name} onClose={onClose} />
         <dl className="space-y-2">
-          <Row label="Type" value="Aggregated bucket" />
-          <Row label="Size" value={formatBytes(r.size)} />
-          <Row label="Items" value={r.other_count.toLocaleString()} />
-          <Row
-            label="Note"
-            value="These items were too small to draw individually. Drill down to see them."
-          />
+          <Row label="Type" value="Grouped items" />
+          <Row label="Total size" value={formatBytes(r.size)} />
+          <Row label="Item count" value={r.other_count.toLocaleString()} />
         </dl>
+        <p className="mt-4 text-[11px] leading-relaxed text-zinc-500">
+          These items are too small to display individually at this zoom level. Double-click
+          the parent folder to drill down and view them.
+        </p>
       </div>
     );
   }
   if (!selectedAbsPath) {
     return (
       <div className="grid h-full place-items-center p-4 text-center text-zinc-500">
-        <p>Select a rectangle or a tree row to see details.</p>
+        <p>Select an item to view its details.</p>
       </div>
     );
   }
   const name = selectedAbsPath[selectedAbsPath.length - 1] ?? "";
   const ext = extOf(name);
   const isDir = meta?.is_dir ?? false;
-  const type = isDir ? "Folder" : ext ? `.${ext} file` : "File";
+  const type = isDir ? "Folder" : ext ? `${ext.toUpperCase()} file` : "File";
   const absPath = joinPath(scanRootPath, selectedAbsPath);
   const isDeleted = meta?.deleted ?? false;
   return (
@@ -578,11 +581,11 @@ function DetailsTab({
           <Row label="Type" value={type} />
           <Row label="Size" value={formatBytes(meta ? meta.size : 0)} />
           <Row
-            label={isDir ? "Direct children" : "Items"}
+            label={isDir ? "Items" : "File count"}
             value={(meta ? meta.child_count : 1).toLocaleString()}
           />
-          <Row label="Modified" value={formatDate(meta ? meta.modified_ms : null)} />
-          <Row label="Path" value={absPath} mono />
+          <Row label="Last modified" value={formatDate(meta ? meta.modified_ms : null)} />
+          <Row label="Location" value={absPath} mono />
         </dl>
       </div>
       {!isDeleted && selectedAbsPath.length > 0 && (
@@ -611,7 +614,7 @@ function DetailsTab({
             }
             className="flex-1 rounded border border-red-800 bg-red-950/60 px-2 py-1 text-xs text-red-300 hover:bg-red-900/70"
           >
-            Delete permanently…
+            Delete Permanently…
           </button>
         </div>
       )}
@@ -628,7 +631,7 @@ function Header({ title, onClose }: { title: string; onClose: () => void }) {
         className="text-zinc-500 hover:text-zinc-200"
         aria-label="Close details"
       >
-        ✕
+        ×
       </button>
     </div>
   );
@@ -1016,14 +1019,16 @@ function ContextMenu({
       onMouseDown={(e) => e.stopPropagation()}
     >
       {deleted ? (
-        <div className="px-3 py-1 text-zinc-500 italic">{isDir ? "Folder" : "File"} deleted</div>
+        <div className="px-3 py-1 text-zinc-500 italic">
+          {isDir ? "Folder" : "File"} has been deleted
+        </div>
       ) : (
         <>
           <MenuItem label="Reveal in Finder" onClick={() => run("reveal")} />
           <MenuItem label={isDir ? "Open in Finder" : "Open"} onClick={() => run("open")} />
           <div className="my-1 border-t border-zinc-800" />
           <MenuItem label="Move to Trash…" danger onClick={() => run("trash")} />
-          <MenuItem label="Delete permanently…" danger onClick={() => run("delete")} />
+          <MenuItem label="Delete Permanently…" danger onClick={() => run("delete")} />
         </>
       )}
     </div>
@@ -1064,8 +1069,8 @@ function ConfirmDeleteDialog({
         </h2>
         <p className="mt-2 break-all font-mono text-xs text-zinc-400">{state.absPath}</p>
         <p className="mt-3 text-xs text-red-300">
-          This bypasses the Trash and cannot be undone.
-          {state.isDir && " The entire folder and all its contents will be removed."}
+          This action bypasses the Trash and cannot be undone.
+          {state.isDir && " The folder and all of its contents will be permanently removed."}
         </p>
         <div className="mt-5 flex justify-end gap-2">
           <button
@@ -1079,7 +1084,7 @@ function ConfirmDeleteDialog({
             onClick={onConfirm}
             className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500"
           >
-            Delete permanently
+            Delete Permanently
           </button>
         </div>
       </div>

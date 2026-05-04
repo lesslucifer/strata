@@ -1,8 +1,8 @@
 [package]
 name = "strata"
 version = "0.1.0"
-description = "A Rust + Tauri disk usage analyzer"
-authors = ["you"]
+description = "Strata — Visualize disk usage as an interactive treemap."
+authors = ["The Strata Contributors"]
 edition = "2021"
 rust-version = "1.77"
 

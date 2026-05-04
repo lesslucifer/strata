@@ -67,16 +67,16 @@ function TypesTabImpl({ scanEpoch, extFilter, onFilter }: Props) {
     return <div className="p-4 text-red-400">Error: {error}</div>;
   }
   if (!rows) {
-    return <div className="p-4 text-zinc-500">Computing types…</div>;
+    return <div className="p-4 text-zinc-500">Analyzing file types…</div>;
   }
   if (rows.length === 0) {
-    return <div className="p-4 text-zinc-500">No files.</div>;
+    return <div className="p-4 text-zinc-500">No files to display.</div>;
   }
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-3 py-1.5 text-[10px] uppercase tracking-wide text-zinc-500">
-        <span className="flex-1">Type</span>
+        <span className="flex-1">File Type</span>
         <SortHeader active={sort === "size"} onClick={() => setSort("size")}>
           Size
         </SortHeader>
@@ -97,11 +97,11 @@ function TypesTabImpl({ scanEpoch, extFilter, onFilter }: Props) {
         {tail && (
           <div
             className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-500"
-            title={`${tail.types.toLocaleString()} other types not shown`}
+            title={`${tail.types.toLocaleString()} additional file types not shown`}
           >
             <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/30 bg-zinc-700" />
-            <span className="min-w-0 flex-1 truncate font-mono italic">
-              + {tail.types.toLocaleString()} more types
+            <span className="min-w-0 flex-1 truncate italic">
+              {tail.types.toLocaleString()} additional types
             </span>
             <span className="w-14 shrink-0 text-right tabular-nums">{formatBytes(tail.size)}</span>
             <span className="w-12 shrink-0 text-right tabular-nums">
@@ -128,7 +128,7 @@ interface RowProps {
 }
 
 const TypeRow = memo(function TypeRow({ stat, active, maxSize, onFilter }: RowProps) {
-  const label = stat.ext === "" ? "(no ext)" : `.${stat.ext}`;
+  const label = stat.ext === "" ? "No extension" : `.${stat.ext}`;
   const swatch = colorFor(stat.ext === "" ? "x" : `x.${stat.ext}`, false);
   const pct = maxSize > 0 ? (stat.size / maxSize) * 100 : 0;
   return (

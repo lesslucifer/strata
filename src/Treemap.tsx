@@ -228,14 +228,14 @@ export function Treemap({
         >
           <div className="font-mono">{hover.rect.name}</div>
           <div className="text-zinc-400">{formatBytes(hover.rect.size)}</div>
-          {hover.rect.kind !== "other" && (
+          {hover.rect.kind !== "other" && hover.rect.rel_path.length > 0 && (
             <div className="text-zinc-500">{hover.rect.rel_path.join(" / ")}</div>
           )}
         </div>
       )}
       {loading && (
         <div className="pointer-events-none absolute right-2 top-2 rounded bg-zinc-900/80 px-2 py-1 text-xs text-zinc-400">
-          Laying out…
+          Updating layout…
         </div>
       )}
     </div>
