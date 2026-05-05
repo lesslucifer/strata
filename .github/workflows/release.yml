@@ -87,6 +87,11 @@ jobs:
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
+        env:
+          # Ad-hoc sign macOS builds so arm64 binaries aren't SIGKILL'd by the
+          # kernel when launched from a quarantined download. Users still see
+          # a Gatekeeper prompt; without this, the aarch64 app would just crash.
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && '-' || '' }}
         with:
           args: --target ${{ matrix.target }}
 
