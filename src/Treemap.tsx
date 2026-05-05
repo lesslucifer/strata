@@ -8,6 +8,9 @@ export interface SelectedRect {
   rect: RenderRect;
 }
 
+/// `rect.rel_path` is relative to the current focus. Callers that need a
+/// from-scan-root path should compose `[...focus, ...rect.rel_path]`.
+
 interface Props {
   focusPath: string[]; // segments from scan root to current focus
   scanEpoch: number; // bump to force re-fetch after a new scan
@@ -248,8 +251,14 @@ export function Treemap({
           {hover.rect.kind === "group" && (
             <div className="text-zinc-500">Grouped — double-click to drill in</div>
           )}
-          {hover.rect.kind !== "other" && hover.rect.rel_path.length > 0 && (
-            <div className="text-zinc-500">{hover.rect.rel_path.join(" / ")}</div>
+          {hover.rect.kind === "other" ? (
+            <div className="text-zinc-500">
+              in {hover.rect.rel_path.length > 0 ? hover.rect.rel_path.join(" / ") : "."}
+            </div>
+          ) : (
+            hover.rect.rel_path.length > 0 && (
+              <div className="text-zinc-500">{hover.rect.rel_path.join(" / ")}</div>
+            )
           )}
         </div>
       )}

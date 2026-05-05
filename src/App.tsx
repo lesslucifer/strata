@@ -501,6 +501,7 @@ export default function App() {
             scanEpoch={scanEpoch}
             scanRootName={summary.root_name}
             scanRootPath={summary.path}
+            focus={focus}
             selectedAbsPath={selectedAbsPath}
             selectedOther={selectedOther}
             selectedMeta={selectedMeta}
@@ -582,6 +583,7 @@ function SidePanel({
   scanEpoch,
   scanRootName,
   scanRootPath,
+  focus,
   selectedAbsPath,
   selectedOther,
   selectedMeta,
@@ -597,6 +599,7 @@ function SidePanel({
   scanEpoch: number;
   scanRootName: string;
   scanRootPath: string;
+  focus: string[];
   selectedAbsPath: string[] | null;
   selectedOther: SelectedRect | null;
   selectedMeta: NodeMeta | null;
@@ -637,6 +640,7 @@ function SidePanel({
             selectedOther={selectedOther}
             meta={selectedMeta}
             scanRootPath={scanRootPath}
+            focus={focus}
             onRequestDelete={onRequestDelete}
             onClose={onClose}
           />
@@ -710,6 +714,7 @@ function DetailsTab({
   selectedOther,
   meta,
   scanRootPath,
+  focus,
   onRequestDelete,
   onClose,
 }: {
@@ -717,11 +722,14 @@ function DetailsTab({
   selectedOther: SelectedRect | null;
   meta: NodeMeta | null;
   scanRootPath: string;
+  focus: string[];
   onRequestDelete: (req: ConfirmState) => void;
   onClose: () => void;
 }) {
   if (selectedOther) {
     const r = selectedOther.rect;
+    // r.rel_path is relative to focus; the absolute parent is focus + rel_path.
+    const parentAbs = joinPath(scanRootPath, [...focus, ...r.rel_path]);
     return (
       <div className="h-full overflow-auto p-4">
         <Header title={r.name} onClose={onClose} />
@@ -729,6 +737,7 @@ function DetailsTab({
           <Row label="Type" value="Grouped items" />
           <Row label="Total size" value={formatBytes(r.size)} />
           <Row label="Item count" value={r.other_count.toLocaleString()} />
+          <LocationRow absPath={parentAbs} />
         </dl>
         <p className="mt-4 text-[11px] leading-relaxed text-zinc-500">
           These items are too small to display individually at this zoom level. Double-click

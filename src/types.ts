@@ -7,7 +7,7 @@ export interface ScanSummary {
   elapsed_ms: number;
 }
 
-export type ScanPhase = "walking" | "building" | "indexing";
+export type ScanPhase = "prescan" | "walking" | "building" | "indexing";
 
 export interface ScanProgress {
   files: number;
@@ -18,6 +18,13 @@ export interface ScanProgress {
   /// Per-category accumulated bytes; slot order matches CATEGORIES in
   /// colors.ts, with a trailing "other / unknown" bucket.
   category_bytes: number[];
+  /// Fraction of the walking phase that's complete, in [0, 1]. 0 during
+  /// prescan, 1 during building/indexing.
+  progress: number;
+  /// Top-level subdirs of the scan root that the prescan identified.
+  checkpoints_total: number;
+  /// Number of those subdirs whose subtree has been fully traversed.
+  checkpoints_done: number;
 }
 
 export type RectKind = "file" | "dir" | "other" | "group";
@@ -30,6 +37,9 @@ export interface RenderRect {
   name: string;
   size: number;
   kind: RectKind;
+  /// For "file"/"dir"/"group", the path from the focus root to this node.
+  /// For "other", the path to the *parent* directory whose siblings were
+  /// merged (the bucket itself isn't a node and isn't drillable).
   rel_path: string[];
   other_count: number;
   deleted: boolean;

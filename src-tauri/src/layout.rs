@@ -28,7 +28,9 @@ pub struct RenderRect {
     pub size: u64,
     pub kind: RectKind,
     /// Path segments from the layout root to this rect's owning node.
-    /// Empty for `Other` aggregations (they don't represent a single node).
+    /// For `Other` aggregations, this is the parent directory whose siblings
+    /// were merged — useful for showing where the bucket lives, even though
+    /// the rect itself isn't drillable.
     pub rel_path: Vec<String>,
     /// For `Other` rects, how many siblings were merged.
     pub other_count: u32,
@@ -225,7 +227,7 @@ fn layout_node(
                 name: format!("({} other items)", other_count),
                 size: other_size,
                 kind: RectKind::Other,
-                rel_path: Vec::new(),
+                rel_path: base_path.to_vec(),
                 other_count,
                 deleted: false,
                 total_files: 0,

@@ -28,16 +28,32 @@ pub struct ScanProgress {
     pub dirs: u64,
     pub bytes: u64,
     pub current_path: String,
-    /// "walking" while jwalk runs, "building" while we assemble the tree,
-    /// "indexing" while we precompute type stats. The frontend uses this to
-    /// keep the user informed during the silent post-walk phases.
+    /// "prescan" while we enumerate checkpoints, "walking" while jwalk runs,
+    /// "building" while we assemble the tree, "indexing" while we precompute
+    /// type stats. The frontend uses this to keep the user informed during
+    /// the silent post-walk phases.
     pub phase: String,
     /// Per-category accumulated bytes (slot order matches categories.rs and
     /// src/colors.ts CATEGORIES; trailing entry is the "other/unknown" bucket).
     pub category_bytes: Vec<u64>,
+    /// Fraction of work completed in [0.0, 1.0] during the "walking" phase.
+    /// Derived from a shallow prescan that weights each top-level subdir by
+    /// the number of entries it contains a few levels deep. 0.0 during
+    /// prescan, 1.0 during building/indexing.
+    pub progress: f32,
+    /// Total checkpoints (top-level subdirs of the scan root) discovered by
+    /// the prescan. Useful for showing "X of N folders".
+    pub checkpoints_total: u32,
+    /// Approximate number of checkpoints whose subtree has been fully
+    /// traversed during the walk.
+    pub checkpoints_done: u32,
 }
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+/// Depth at which the prescan stops counting entries. Deep enough to
+/// distinguish "shallow but heavy" subtrees from "deep and big" ones; shallow
+/// enough to finish in well under a second on typical home directories.
+const PRESCAN_DEPTH: usize = 3;
 
 #[tauri::command]
 pub async fn scan_directory(
@@ -65,7 +81,11 @@ pub async fn scan_directory(
     // instant on first open.
     let cancel_for_blocking = Arc::clone(&cancel_handle);
     let result = tauri::async_runtime::spawn_blocking(move || -> Option<_> {
-        let (entries, totals) = walk(&scan_path, &app_for_blocking, &cancel_for_blocking);
+        let plan = prescan(&scan_path, &app_for_blocking, &cancel_for_blocking);
+        if cancel_for_blocking.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (entries, totals) = walk(&scan_path, &plan, &app_for_blocking, &cancel_for_blocking);
         if cancel_for_blocking.load(Ordering::Relaxed) {
             return None;
         }
@@ -125,14 +145,121 @@ pub struct WalkTotals {
     pub category_bytes: Vec<u64>,
 }
 
-fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> (Vec<EntryInfo>, WalkTotals) {
+/// Output of the shallow prescan: an ordered list of top-level subdirs of the
+/// scan root with a relative weight (entries observed up to PRESCAN_DEPTH).
+/// The walk uses these as "checkpoints" to estimate progress.
+pub struct ScanPlan {
+    /// Top-level subdir paths (depth 1 children of the scan root).
+    pub checkpoints: Vec<PathBuf>,
+    /// Per-checkpoint weight, parallel to `checkpoints`. Always >= 1 so we
+    /// can divide without guarding.
+    pub weights: Vec<u64>,
+    /// Sum of `weights`. Always >= 1.
+    pub total_weight: u64,
+    /// Direct entries (files + first-level dirs that we don't recurse into,
+    /// like symlinks the user picked) that aren't under any checkpoint.
+    /// Counted as a single synthetic checkpoint with weight 1.
+    pub root_extra_weight: u64,
+}
+
+fn prescan(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> ScanPlan {
+    let _ = app.emit(
+        "scan-progress",
+        ScanProgress {
+            files: 0,
+            dirs: 0,
+            bytes: 0,
+            current_path: String::new(),
+            phase: "prescan".into(),
+            category_bytes: vec![0; SLOT_COUNT],
+            progress: 0.0,
+            checkpoints_total: 0,
+            checkpoints_done: 0,
+        },
+    );
+
+    let mut checkpoints: Vec<PathBuf> = Vec::new();
+    let mut weights: Vec<u64> = Vec::new();
+    let mut root_extra: u64 = 0;
+
+    // Direct children of root.
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return ScanPlan {
+            checkpoints,
+            weights,
+            total_weight: 1,
+            root_extra_weight: 1,
+        };
+    };
+    for entry in rd.flatten() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !is_dir {
+            root_extra += 1;
+            continue;
+        }
+        // Count entries up to PRESCAN_DEPTH (relative to this subdir, so we
+        // pass max_depth = PRESCAN_DEPTH). No metadata fetches — just dir
+        // entry enumeration.
+        let mut count: u64 = 1;
+        for e in WalkDir::new(&path)
+            .skip_hidden(false)
+            .follow_links(false)
+            .max_depth(PRESCAN_DEPTH)
+            .into_iter()
+            .take_while(|_| !cancel.load(Ordering::Relaxed))
+            .flatten()
+        {
+            // Skip the root entry itself (depth 0 is the dir we passed in).
+            if e.depth == 0 {
+                continue;
+            }
+            count += 1;
+        }
+        checkpoints.push(path);
+        weights.push(count);
+    }
+
+    let total_weight = weights.iter().sum::<u64>() + root_extra.max(1);
+    ScanPlan {
+        checkpoints,
+        weights,
+        total_weight: total_weight.max(1),
+        root_extra_weight: root_extra.max(1),
+    }
+}
+
+fn walk(
+    root: &Path,
+    plan: &ScanPlan,
+    app: &AppHandle,
+    cancel: &AtomicBool,
+) -> (Vec<EntryInfo>, WalkTotals) {
     let files = AtomicU64::new(0);
     let dirs = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
     // One atomic per category slot. Updated on every file entry; read by the
     // throttled emitter without locking. Cheap relative to the metadata calls.
     let category_bytes: Vec<AtomicU64> = (0..SLOT_COUNT).map(|_| AtomicU64::new(0)).collect();
+    // Per-checkpoint observed entry counts, parallel to plan.checkpoints.
+    // Each entry's depth-1 ancestor (under root) maps to a checkpoint index;
+    // walk results outside any checkpoint contribute to `seen_root_extra`.
+    let seen_per_ck: Vec<AtomicU64> =
+        (0..plan.checkpoints.len()).map(|_| AtomicU64::new(0)).collect();
+    let seen_root_extra = AtomicU64::new(0);
     let last_emit = Mutex::new(Instant::now() - PROGRESS_INTERVAL);
+
+    // Map from depth-1 child name -> checkpoint index. Faster than a path
+    // comparison in the hot loop.
+    let ck_index: HashMap<std::ffi::OsString, usize> = plan
+        .checkpoints
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.file_name().map(|n| (n.to_os_string(), i)))
+        .collect();
 
     let entries: Vec<EntryInfo> = WalkDir::new(root)
         .skip_hidden(false)
@@ -165,7 +292,49 @@ fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> (Vec<EntryInfo>, W
             }
 
             let path = e.path();
-            maybe_emit(app, &last_emit, &files, &dirs, &bytes, &category_bytes, &path);
+            // Bucket this entry into a checkpoint by its depth-1 ancestor.
+            // jwalk's `e.depth` is 0 for the scan root; depth-1 entries are
+            // direct children. For deeper entries, walk parents up to find
+            // the depth-1 ancestor.
+            if e.depth == 0 {
+                // The scan root itself; doesn't contribute to progress.
+            } else if e.depth == 1 {
+                if let Some(name) = path.file_name() {
+                    if let Some(&idx) = ck_index.get(name) {
+                        seen_per_ck[idx].fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        seen_root_extra.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            } else {
+                // depth >= 2: the depth-1 ancestor is the (depth-1)th
+                // component after root. Cheaper than re-stringifying paths.
+                let depth1 = path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(|rel| rel.components().next())
+                    .map(|c| c.as_os_str().to_os_string());
+                if let Some(name) = depth1 {
+                    if let Some(&idx) = ck_index.get(&name) {
+                        seen_per_ck[idx].fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        seen_root_extra.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            maybe_emit(
+                app,
+                &last_emit,
+                &files,
+                &dirs,
+                &bytes,
+                &category_bytes,
+                &path,
+                plan,
+                &seen_per_ck,
+                &seen_root_extra,
+            );
 
             EntryInfo {
                 path,
@@ -192,10 +361,46 @@ fn walk(root: &Path, app: &AppHandle, cancel: &AtomicBool) -> (Vec<EntryInfo>, W
             current_path: String::new(),
             phase: "walking".into(),
             category_bytes: totals.category_bytes.clone(),
+            progress: 1.0,
+            checkpoints_total: plan.checkpoints.len() as u32,
+            checkpoints_done: plan.checkpoints.len() as u32,
         },
     );
 
     (entries, totals)
+}
+
+/// Combine per-checkpoint observed counts vs. prescan weights into a single
+/// progress fraction. Each checkpoint contributes `s / (s + w)` (a smooth
+/// asymptotic curve) instead of `min(s/w, 1)` — the prescan weights are
+/// shallow estimates so they vastly under-count deep subtrees; capping there
+/// causes the bar to saturate per-checkpoint and visibly jump as each new
+/// checkpoint starts. The asymptotic form yields a continuous, monotonic
+/// curve that approaches 1 as scanning continues.
+fn compute_progress(
+    plan: &ScanPlan,
+    seen_per_ck: &[AtomicU64],
+    seen_root_extra: &AtomicU64,
+) -> (f32, u32) {
+    let mut weighted: f64 = 0.0;
+    let mut done: u32 = 0;
+    for (i, w_raw) in plan.weights.iter().enumerate() {
+        let s = seen_per_ck[i].load(Ordering::Relaxed) as f64;
+        let w = (*w_raw as f64).max(1.0);
+        // Asymptotic: 0 → 0, ∞ → 1, halfway when s == w.
+        let contrib = s / (s + w);
+        weighted += contrib * w;
+        if s >= w * 4.0 {
+            // Heuristic: subtree is "done" once we're well past the prescan
+            // estimate. Mostly used for the "X / N folders" fallback label.
+            done += 1;
+        }
+    }
+    let s_extra = seen_root_extra.load(Ordering::Relaxed) as f64;
+    let w_extra = plan.root_extra_weight as f64;
+    weighted += (s_extra / (s_extra + w_extra)) * w_extra;
+    let frac = (weighted / plan.total_weight as f64).min(1.0) as f32;
+    (frac, done)
 }
 
 fn maybe_emit(
@@ -206,6 +411,9 @@ fn maybe_emit(
     bytes: &AtomicU64,
     category_bytes: &[AtomicU64],
     current: &Path,
+    plan: &ScanPlan,
+    seen_per_ck: &[AtomicU64],
+    seen_root_extra: &AtomicU64,
 ) {
     let Ok(mut last) = last_emit.try_lock() else {
         return;
@@ -218,6 +426,7 @@ fn maybe_emit(
     drop(last);
 
     let cats: Vec<u64> = category_bytes.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    let (progress, done) = compute_progress(plan, seen_per_ck, seen_root_extra);
     let _ = app.emit(
         "scan-progress",
         ScanProgress {
@@ -227,6 +436,9 @@ fn maybe_emit(
             current_path: current.to_string_lossy().into_owned(),
             phase: "walking".into(),
             category_bytes: cats,
+            progress,
+            checkpoints_total: plan.checkpoints.len() as u32,
+            checkpoints_done: done,
         },
     );
 }
@@ -244,6 +456,9 @@ fn emit_phase(app: &AppHandle, phase: &str, totals: &WalkTotals) {
             current_path: String::new(),
             phase: phase.into(),
             category_bytes: totals.category_bytes.clone(),
+            progress: 1.0,
+            checkpoints_total: 0,
+            checkpoints_done: 0,
         },
     );
 }
